@@ -1,0 +1,5 @@
+INSERT INTO poems (id, title, title_simplified, dynasty, content, poem_type, search_content) VALUES ('38688452-5969-43bb-9883-71e9a4411f85', '晦日宴高氏林亭', '晦日宴高氏林亭', '唐', '[]', 'shi', '晦日宴高氏林亭 shi');
+INSERT INTO poems (id, title, title_simplified, dynasty, content, poem_type, search_content) VALUES ('7c6f5ecb-1382-4078-aa6b-82ca8b0ef935', '晦日重宴', '晦日重宴', '唐', '[]', 'shi', '晦日重宴 shi');
+INSERT INTO poems (id, title, title_simplified, dynasty, content, poem_type, search_content) VALUES ('da77b7e5-9fe2-4b4b-b066-f8a8c12e6ed0', '上元夜效小庾體', '上元夜效小庾體', '唐', '[]', 'shi', '上元夜效小庾體 shi');
+INSERT INTO poems (id, title, title_simplified, dynasty, content, poem_type, search_content) VALUES ('b56dbf0a-4b3f-49c6-839f-1505b8ebd5e7', '晦日宴高氏林亭', '晦日宴高氏林亭', '唐', '[]', 'shi', '晦日宴高氏林亭 shi');
+INSERT INTO poems (id, title, title_simplified, dynasty, content, poem_type, search_content) VALUES ('f383a4f8-29f6-447b-b00b-d4e6457e887f', '晦日重宴', '晦日重宴', '唐', '[]', 'shi', '晦日重宴 shi');
