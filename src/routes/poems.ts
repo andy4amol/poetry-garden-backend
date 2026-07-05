@@ -7,6 +7,46 @@ interface Env {
 
 export const poems = new Hono<{ Bindings: Env }>();
 
+const DYNASTY_ALIASES: Record<string, string> = {
+  tang: '唐',
+  song: '宋',
+  yuan: '元',
+  ming: '明',
+  qing: '清',
+  '1': '唐',
+  '2': '宋',
+  '3': '元',
+  '4': '明',
+  '5': '清',
+};
+
+function normalizeDynasty(dynasty?: string) {
+  if (!dynasty) return undefined;
+  return DYNASTY_ALIASES[dynasty.toLowerCase()] || dynasty;
+}
+
+function parseJsonList(value: unknown) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value.split(/\\+n|\r?\n/).filter(Boolean);
+  }
+}
+
+function serializePoem(p: Record<string, unknown>) {
+  return {
+    ...p,
+    author: p.author_name || p.author || '',
+    content: parseJsonList(p.content),
+    content_simplified: p.content_simplified ? parseJsonList(p.content_simplified) : undefined,
+    tags: parseJsonList(p.tags),
+  };
+}
+
 // Validation schemas
 const poemSchema = z.object({
   title: z.string(),
@@ -21,7 +61,7 @@ const poemSchema = z.object({
 poems.get('/', async (c) => {
   const page = parseInt(c.req.query('page') || '1');
   const pageSize = parseInt(c.req.query('page_size') || '20');
-  const dynasty = c.req.query('dynasty');
+  const dynasty = normalizeDynasty(c.req.query('dynasty'));
   const poemType = c.req.query('poem_type');
   const authorId = c.req.query('author_id');
   const search = c.req.query('search') || c.req.query('q');
@@ -32,25 +72,25 @@ poems.get('/', async (c) => {
   const params: (string | number)[] = [];
 
   if (dynasty) {
-    whereClause += ' AND dynasty = ?';
+    whereClause += ' AND p.dynasty = ?';
     params.push(dynasty);
   }
   if (poemType) {
-    whereClause += ' AND poem_type = ?';
+    whereClause += ' AND p.poem_type = ?';
     params.push(poemType);
   }
   if (authorId) {
-    whereClause += ' AND author_id = ?';
+    whereClause += ' AND p.author_id = ?';
     params.push(authorId);
   }
   if (search) {
-    whereClause += ' AND (title LIKE ? OR search_content LIKE ?)';
+    whereClause += ' AND (p.title LIKE ? OR p.search_content LIKE ?)';
     params.push(`%${search}%`, `%${search}%`);
   }
 
   // Get total count
   const countResult = await c.env.DB
-    .prepare(`SELECT COUNT(*) as total FROM poems ${whereClause}`)
+    .prepare(`SELECT COUNT(*) as total FROM poems p ${whereClause}`)
     .bind(...params)
     .first();
   const total = countResult?.total || 0;
@@ -72,29 +112,7 @@ poems.get('/', async (c) => {
   return c.json({
     success: true,
     data: {
-      items: items.results.map((p: Record<string, unknown>) => {
-        let content = p.content as string;
-        if (content) {
-          try {
-            content = JSON.parse(content);
-          } catch {
-            content = (content as string).split('\\n');
-          }
-        } else {
-          content = [];
-        }
-        let tags = p.tags ? (p.tags as string) : '[]';
-        try {
-          tags = JSON.parse(tags as string);
-        } catch {
-          tags = [];
-        }
-        return {
-          ...p,
-          content,
-          tags,
-        };
-      }),
+      items: items.results.map((p: Record<string, unknown>) => serializePoem(p)),
       total,
       page,
       page_size: pageSize,
@@ -121,23 +139,9 @@ poems.get('/random', async (c) => {
     return c.json({ success: false, error: 'No poems found' }, 404);
   }
 
-  let content = firstResult.content as string;
-  if (content) {
-    try {
-      content = JSON.parse(content);
-    } catch {
-      content = (content as string).split('\\n');
-    }
-  } else {
-    content = [];
-  }
-
   return c.json({
     success: true,
-    data: {
-      ...firstResult,
-      content,
-    },
+    data: serializePoem(firstResult as Record<string, unknown>),
   });
 });
 
@@ -180,19 +184,7 @@ poems.get('/search', async (c) => {
   return c.json({
     success: true,
     data: {
-      items: results.results.map((p: Record<string, unknown>) => {
-        let content = p.content as string;
-        if (content) {
-          try {
-            content = JSON.parse(content);
-          } catch {
-            content = (content as string).split('\\n');
-          }
-        } else {
-          content = [];
-        }
-        return { ...p, content };
-      }),
+      items: results.results.map((p: Record<string, unknown>) => serializePoem(p)),
       total,
       page,
       page_size: pageSize,
@@ -219,42 +211,12 @@ poems.get('/:id', async (c) => {
     return c.json({ success: false, error: 'Poem not found' }, 404);
   }
 
-  // Handle content - can be JSON array string or plain text with newlines
-  let content = result.content as string;
-  if (content) {
-    try {
-      content = JSON.parse(content);
-    } catch {
-      // If not valid JSON, treat as newline-separated text
-      content = content.split('\\n');
-    }
-  } else {
-    content = [];
-  }
-
-  let contentSimplified = result.content_simplified as string | null;
-  if (contentSimplified) {
-    try {
-      contentSimplified = JSON.parse(contentSimplified);
-    } catch {
-      contentSimplified = (contentSimplified as string).split('\\n');
-    }
-  }
-
-  let tags = result.tags ? (result.tags as string) : '[]';
-  try {
-    tags = JSON.parse(tags);
-  } catch {
-    tags = [];
-  }
+  const poem = serializePoem(result as Record<string, unknown>);
 
   return c.json({
     success: true,
     data: {
-      ...result,
-      content,
-      content_simplified: contentSimplified,
-      tags,
+      ...poem,
       author: result.author_id
         ? {
             id: result.author_id,

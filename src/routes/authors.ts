@@ -6,11 +6,29 @@ interface Env {
 
 export const authors = new Hono<{ Bindings: Env }>();
 
+const DYNASTY_ALIASES: Record<string, string> = {
+  tang: '唐',
+  song: '宋',
+  yuan: '元',
+  ming: '明',
+  qing: '清',
+  '1': '唐',
+  '2': '宋',
+  '3': '元',
+  '4': '明',
+  '5': '清',
+};
+
+function normalizeDynasty(dynasty?: string) {
+  if (!dynasty) return undefined;
+  return DYNASTY_ALIASES[dynasty.toLowerCase()] || dynasty;
+}
+
 // List all authors
 authors.get('/', async (c) => {
   const page = parseInt(c.req.query('page') || '1');
   const pageSize = parseInt(c.req.query('page_size') || '20');
-  const dynasty = c.req.query('dynasty');
+  const dynasty = normalizeDynasty(c.req.query('dynasty') || c.req.query('dynasty_id'));
   const search = c.req.query('search');
 
   const offset = (page - 1) * pageSize;

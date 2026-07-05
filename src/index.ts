@@ -6,6 +6,9 @@ import { authors } from './routes/authors';
 import { auth } from './routes/auth';
 import { collections } from './routes/collections';
 import { convert } from './routes/convert';
+import { works } from './routes/works';
+import { library } from './routes/library';
+import { search } from './routes/search';
 
 const app = new Hono();
 
@@ -23,8 +26,24 @@ app.get('/api/health', (c) => {
   return json({ version: c.env.API_VERSION || '1.0.0', status: 'ok' });
 });
 
+app.get('/api/dynasties', (c) => {
+  return c.json({
+    success: true,
+    data: [
+      { id: 1, name: 'Tang', name_zh: '唐代' },
+      { id: 2, name: 'Song', name_zh: '宋代' },
+      { id: 3, name: 'Yuan', name_zh: '元代' },
+      { id: 4, name: 'Ming', name_zh: '明代' },
+      { id: 5, name: 'Qing', name_zh: '清代' },
+    ],
+  });
+});
+
 // Routes
 app.route('/api/poems', poems);
+app.route('/api/works', works);
+app.route('/api/library', library);
+app.route('/api/search', search);
 app.route('/api/authors', authors);
 app.route('/api/auth', auth);
 app.route('/api/collections', collections);
@@ -32,12 +51,12 @@ app.route('/api/convert', convert);
 
 // Fallback
 app.notFound((c) => {
-  return json({ error: 'Not found' }, false, 'Endpoint not found');
+  return c.json({ success: false, data: { error: 'Not found' }, message: 'Endpoint not found' }, 404);
 });
 
-app.onError((c, err) => {
+app.onError((err, c) => {
   console.error('Error:', err);
-  return json({ error: err.message }, false, 'Internal server error');
+  return c.json({ success: false, data: { error: err.message }, message: 'Internal server error' }, 500);
 });
 
 export default app;

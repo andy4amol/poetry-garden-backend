@@ -4,11 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "db:schema": "wrangler d1 execute poetry-garden --local --file=migrations/0001_content_platform.sql",
+    "import:generate": "node scripts/generate-content-import.mjs",
+    "import:sample": "node scripts/generate-content-import.mjs --limit 200"
   },
   "dependencies": {
     "@hono/zod-validator": "^0.2.0",
     "hono": "^4.0.0",
+    "opencc-js": "^1.4.0",
     "wrangler": "^4.47.0",
     "zod": "^3.22.0"
   }
