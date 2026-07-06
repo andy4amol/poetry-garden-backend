@@ -15,8 +15,10 @@ const t2s = createT2S({ from: "tw", to: "cn" });
 const args = parseArgs(process.argv.slice(2));
 const dataDir = path.resolve(args.data || defaultDataDir);
 const outDir = path.resolve(args.out || path.join(repoRoot, "imports", "content"));
+const r2Dir = path.join(outDir, "r2");
+const r2Bucket = args.r2Bucket || "poetry-garden-content";
 const limit = args.limit ? Number(args.limit) : Infinity;
-const batchSize = args.batchSize ? Number(args.batchSize) : 400;
+const catalogPageSize = args.catalogPageSize ? Number(args.catalogPageSize) : 1000;
 
 const collections = new Map();
 const authors = new Map();
@@ -24,7 +26,9 @@ const works = [];
 const nodes = [];
 const paragraphs = [];
 const strains = [];
-const searchRows = [];
+const searchIndexRows = [];
+const r2Objects = [];
+const workContentByShard = new Map();
 const nodeById = new Map();
 const nodeParagraphs = new Map();
 
@@ -68,13 +72,25 @@ function s(text) {
   return t2s(String(text || ""));
 }
 
-function sql(value) {
-  if (value === null || value === undefined) return "NULL";
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
 function json(value) {
   return JSON.stringify(value ?? null);
+}
+
+function preview(lines, maxLength = 80) {
+  return lines.join("").slice(0, maxLength);
+}
+
+function writeR2Json(key, value) {
+  const filePath = path.join(r2Dir, key);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(value)}\n`);
+  r2Objects.push({ key, file: path.relative(outDir, filePath), bytes: fs.statSync(filePath).size });
+}
+
+function addWorkContent(workId, value) {
+  const shard = workId.slice(0, 2);
+  if (!workContentByShard.has(shard)) workContentByShard.set(shard, {});
+  workContentByShard.get(shard)[workId] = value;
 }
 
 function linesFrom(value) {
@@ -137,6 +153,10 @@ function addWork(input) {
   const simplifiedLines = traditionalLines.map(s);
   const plainTraditional = traditionalLines.join("\n");
   const plainSimplified = simplifiedLines.join("\n");
+  const r2Key = `works-shards/${workId.slice(0, 2)}.json`;
+  const tags = input.tags ? (Array.isArray(input.tags) ? input.tags : [input.tags]) : [];
+  const metadata = input.metadata || {};
+  const notes = input.notes || null;
 
   works.push({
     id: workId,
@@ -153,32 +173,55 @@ function addWork(input) {
     sourcePath: input.sourcePath || null,
     sourceId: input.sourceId || input.id || null,
     sourceRef: input.sourceRef || null,
-    contentTraditional: json(traditionalLines),
-    contentSimplified: json(simplifiedLines),
-    plainTextTraditional: plainTraditional,
-    plainTextSimplified: plainSimplified,
-    notes: input.notes ? json(input.notes) : null,
-    translation: input.translation || null,
-    annotation: input.annotation || input.prologue || null,
-    tags: input.tags ? json(Array.isArray(input.tags) ? input.tags : [input.tags]) : null,
-    metadata: json(input.metadata || {}),
+    r2Key,
+    previewTraditional: preview(traditionalLines),
+    previewSimplified: preview(simplifiedLines),
+    tags: tags.length ? json(tags) : null,
+    metadata: json(metadata),
     popularityScore: input.popularityScore || 0,
     wordCount: plainSimplified.replace(/\s/g, "").length,
     lineCount: traditionalLines.length,
   });
 
+  addWorkContent(workId, {
+    id: workId,
+    title_traditional: title,
+    title_simplified: s(title),
+    author_id: authorId,
+    author_name_traditional: input.author || "",
+    author_name_simplified: s(input.author || ""),
+    dynasty: input.dynasty || null,
+    genre: input.genre,
+    form_type: input.formType || null,
+    rhythmic: input.rhythmic || null,
+    collection_id: input.collectionId || null,
+    content_traditional: traditionalLines,
+    content_simplified: simplifiedLines,
+    plain_text_traditional: plainTraditional,
+    plain_text_simplified: plainSimplified,
+    notes,
+    translation: input.translation || null,
+    annotation: input.annotation || input.prologue || null,
+    tags,
+    metadata,
+    source_path: input.sourcePath || null,
+    source_id: input.sourceId || input.id || null,
+    source_ref: input.sourceRef || null,
+  });
+
   if (authorId) authors.get(authorId).workCount++;
   if (input.collectionId && collections.has(input.collectionId)) collections.get(input.collectionId).itemCount++;
 
-  searchRows.push({
-    entityType: "work",
-    entityId: workId,
-    title: `${title} ${s(title)}`,
-    author: `${input.author || ""} ${s(input.author || "")}`,
-    body: `${plainTraditional}\n${plainSimplified}`,
+  searchIndexRows.push({
+    workId,
+    titleTraditional: title,
+    titleSimplified: s(title),
+    authorNameTraditional: input.author || "",
+    authorNameSimplified: s(input.author || ""),
     dynasty: input.dynasty || "",
     genre: input.genre,
-    collection: input.collectionTitle || "",
+    collectionId: input.collectionId || null,
+    keywordText: [title, s(title), input.author || "", s(input.author || ""), input.dynasty || "", input.genre, input.collectionTitle || "", ...tags].filter(Boolean).join(" "),
   });
 
   return workId;
@@ -201,6 +244,9 @@ function addNode({ collectionId, parentId = null, nodeType, title, author = "", 
     orderIndex,
     paragraphCount: 0,
     metadata: json(metadata),
+    r2Key: null,
+    previewTraditional: "",
+    previewSimplified: "",
   };
   nodes.push(node);
   nodeById.set(id, node);
@@ -217,6 +263,8 @@ function addNodeParagraph(nodeId, text, orderIndex, metadata = {}) {
     orderIndex,
     textTraditional: value,
     textSimplified: s(value),
+    previewTraditional: value.slice(0, 80),
+    previewSimplified: s(value).slice(0, 80),
     annotation: null,
     translation: null,
     notes: null,
@@ -427,78 +475,255 @@ function importStrains() {
   }
 }
 
-function addBookSearchRows() {
+function writeNodeContentObjects() {
   for (const node of nodes) {
     const lines = nodeParagraphs.get(node.id) || [];
     if (!lines.length) continue;
 
     const collection = collections.get(node.collectionId);
-    lines.forEach((line, index) => {
-      searchRows.push({
-        entityType: "node",
-        entityId: node.id,
-        title: `${node.titleTraditional} ${node.titleSimplified}`,
-        author: `${node.authorNameTraditional || ""} ${node.authorNameSimplified || ""}`,
-        body: `${line}\n${s(line)}`,
-        dynasty: collection?.dynasty || "",
-        genre: collection?.type || "book",
-        collection: collection?.titleSimplified || collection?.titleTraditional || "",
-        orderIndex: index,
-      });
+    const simplifiedLines = lines.map(s);
+    node.r2Key = `nodes/${node.id}.json`;
+    node.previewTraditional = preview(lines);
+    node.previewSimplified = preview(simplifiedLines);
+
+    writeR2Json(node.r2Key, {
+      id: node.id,
+      collection_id: node.collectionId,
+      collection_slug: collection?.slug || null,
+      title_traditional: node.titleTraditional,
+      title_simplified: node.titleSimplified,
+      author_name_traditional: node.authorNameTraditional || "",
+      author_name_simplified: node.authorNameSimplified || "",
+      paragraphs: lines.map((line, index) => ({
+        id: idFor("paragraph", node.id, String(index)),
+        order_index: index,
+        text_traditional: line,
+        text_simplified: simplifiedLines[index],
+      })),
     });
   }
 }
 
-function collectionInsert(item) {
-  return `INSERT OR REPLACE INTO content_collections (id, slug, title_traditional, title_simplified, type, dynasty, description_traditional, description_simplified, source_path, sort_order, item_count) VALUES (${[
-    item.id, item.slug, item.titleTraditional, item.titleSimplified, item.type, item.dynasty, item.descriptionTraditional, item.descriptionSimplified, item.sourcePath, item.sortOrder, item.itemCount,
-  ].map(sql).join(", ")});`;
+function workSummary(work) {
+  const collection = work.collectionId ? collections.get(work.collectionId) : null;
+  return {
+    id: work.id,
+    title_traditional: work.titleTraditional,
+    title_simplified: work.titleSimplified,
+    author_id: work.authorId,
+    author_name_traditional: work.authorNameTraditional,
+    author_name_simplified: work.authorNameSimplified,
+    dynasty: work.dynasty,
+    genre: work.genre,
+    form_type: work.formType,
+    rhythmic: work.rhythmic,
+    collection_id: work.collectionId,
+    collection_slug: collection?.slug || null,
+    collection_title_traditional: collection?.titleTraditional || null,
+    collection_title_simplified: collection?.titleSimplified || null,
+    r2_key: work.r2Key,
+    preview_traditional: work.previewTraditional,
+    preview_simplified: work.previewSimplified,
+    content_traditional: [work.previewTraditional],
+    content_simplified: [work.previewSimplified],
+    tags: work.tags ? JSON.parse(work.tags) : [],
+    popularity_score: work.popularityScore,
+    word_count: work.wordCount,
+    line_count: work.lineCount,
+  };
 }
 
-function authorInsert(item) {
-  return `INSERT OR REPLACE INTO content_authors (id, name_traditional, name_simplified, dynasty, description_traditional, description_simplified, source, source_id, work_count) VALUES (${[
-    item.id, item.nameTraditional, item.nameSimplified, item.dynasty, item.descriptionTraditional, item.descriptionSimplified, item.source, item.sourceId, item.workCount,
-  ].map(sql).join(", ")});`;
-}
-
-function workInsert(item) {
-  return `INSERT OR REPLACE INTO works (id, title_traditional, title_simplified, author_id, author_name_traditional, author_name_simplified, dynasty, genre, form_type, rhythmic, collection_id, source_path, source_id, source_ref, content_traditional, content_simplified, plain_text_traditional, plain_text_simplified, notes, translation, annotation, tags, metadata, popularity_score, word_count, line_count) VALUES (${[
-    item.id, item.titleTraditional, item.titleSimplified, item.authorId, item.authorNameTraditional, item.authorNameSimplified, item.dynasty, item.genre, item.formType, item.rhythmic, item.collectionId, item.sourcePath, item.sourceId, item.sourceRef, item.contentTraditional, item.contentSimplified, item.plainTextTraditional, item.plainTextSimplified, item.notes, item.translation, item.annotation, item.tags, item.metadata, item.popularityScore, item.wordCount, item.lineCount,
-  ].map(sql).join(", ")});`;
-}
-
-function nodeInsert(item) {
-  return `INSERT OR REPLACE INTO book_nodes (id, collection_id, parent_id, node_type, title_traditional, title_simplified, author_id, author_name_traditional, author_name_simplified, source_path, source_ref, order_index, paragraph_count, metadata) VALUES (${[
-    item.id, item.collectionId, item.parentId, item.nodeType, item.titleTraditional, item.titleSimplified, item.authorId, item.authorNameTraditional, item.authorNameSimplified, item.sourcePath, item.sourceRef, item.orderIndex, item.paragraphCount, item.metadata,
-  ].map(sql).join(", ")});`;
-}
-
-function paragraphInsert(item) {
-  return `INSERT OR REPLACE INTO paragraphs (id, work_id, node_id, order_index, text_traditional, text_simplified, annotation, translation, notes, metadata) VALUES (${[
-    item.id, item.workId, item.nodeId, item.orderIndex, item.textTraditional, item.textSimplified, item.annotation, item.translation, item.notes, item.metadata,
-  ].map(sql).join(", ")});`;
-}
-
-function strainInsert(item) {
-  return `INSERT OR REPLACE INTO work_strains (work_id, line_index, pattern) VALUES (${[
-    item.workId, item.lineIndex, item.pattern,
-  ].map(sql).join(", ")});`;
-}
-
-function searchInsert(item) {
-  return `INSERT INTO content_search (entity_type, entity_id, title, author, body, dynasty, genre, collection) VALUES (${[
-    item.entityType, item.entityId, item.title, item.author, item.body, item.dynasty, item.genre, item.collection,
-  ].map(sql).join(", ")});`;
-}
-
-function writeBatches(name, rows, mapper) {
-  let fileIndex = 0;
-  for (let index = 0; index < rows.length; index += batchSize) {
-    const chunk = rows.slice(index, index + batchSize);
-    const output = [...chunk.map(mapper), ""].join("\n");
-    fs.writeFileSync(path.join(outDir, `${name}_${String(fileIndex).padStart(4, "0")}.sql`), output);
-    fileIndex++;
+function writePagedCatalog(prefix, rows) {
+  const total = rows.length;
+  const totalPages = Math.max(1, Math.ceil(total / catalogPageSize));
+  for (let page = 1; page <= totalPages; page++) {
+    const start = (page - 1) * catalogPageSize;
+    writeR2Json(`${prefix}/page-${String(page).padStart(5, "0")}.json`, {
+      items: rows.slice(start, start + catalogPageSize),
+      total,
+      page,
+      page_size: catalogPageSize,
+      total_pages: totalPages,
+    });
   }
+}
+
+function safeSegment(value) {
+  return encodeURIComponent(String(value || "_")).replace(/%/g, "~");
+}
+
+function searchBucketFor(value) {
+  const char = [...String(value || "")][0];
+  if (!char) return null;
+  return (char.codePointAt(0) % 256).toString(16).padStart(2, "0");
+}
+
+function addToBucket(map, key, value) {
+  if (!key) return;
+  if (!map.has(key)) map.set(key, []);
+  map.get(key).push(value);
+}
+
+function dynastyLabel(name) {
+  if (String(name).endsWith("代")) return name;
+  if (["唐", "宋", "元", "明", "清"].includes(String(name))) return `${name}代`;
+  return String(name);
+}
+
+function writeCatalogIndexes() {
+  for (const [shard, values] of workContentByShard) {
+    writeR2Json(`works-shards/${shard}.json`, values);
+  }
+
+  const sortedWorks = works.map(workSummary).sort((a, b) => (b.popularity_score || 0) - (a.popularity_score || 0));
+  writePagedCatalog("catalog/works/all", sortedWorks);
+
+  const buckets = new Map();
+  const authorBuckets = new Map();
+  const searchBuckets = new Map();
+
+  for (const summary of sortedWorks) {
+    addToBucket(buckets, `genre/${safeSegment(summary.genre)}`, summary);
+    addToBucket(buckets, `dynasty/${safeSegment(summary.dynasty)}`, summary);
+    addToBucket(authorBuckets, summary.author_id, summary);
+    addToBucket(buckets, `collection/${safeSegment(summary.collection_id)}`, summary);
+    if (summary.genre && summary.dynasty) addToBucket(buckets, `genre/${safeSegment(summary.genre)}/dynasty/${safeSegment(summary.dynasty)}`, summary);
+
+    const searchText = [
+      summary.title_traditional,
+      summary.title_simplified,
+      summary.author_name_traditional,
+      summary.author_name_simplified,
+      summary.dynasty,
+      summary.genre,
+    ].filter(Boolean).join(" ");
+    const chars = new Set([
+      [...String(summary.title_traditional || '')][0],
+      [...String(summary.title_simplified || '')][0],
+      [...String(summary.author_name_traditional || '')][0],
+      [...String(summary.author_name_simplified || '')][0],
+    ].filter(Boolean));
+    for (const char of chars) {
+      const key = searchBucketFor(char);
+      addToBucket(searchBuckets, key, { ...summary, search_text: searchText });
+    }
+  }
+
+  for (const [key, rows] of buckets) {
+    writePagedCatalog(`catalog/works/${key}`, rows);
+  }
+
+  const authorShards = new Map();
+  for (const [authorId, rows] of authorBuckets) {
+    if (!authorId) continue;
+    const shard = String(authorId).slice(0, 2);
+    if (!authorShards.has(shard)) authorShards.set(shard, {});
+    authorShards.get(shard)[authorId] = rows;
+  }
+  for (const [shard, authorMap] of authorShards) {
+    writeR2Json(`catalog/works/author-shards/${shard}.json`, authorMap);
+  }
+
+  for (const [key, rows] of searchBuckets) {
+    writeR2Json(`catalog/search-buckets/${key}.json`, rows);
+  }
+
+  const authorRows = [...authors.values()].map((author) => ({
+    id: author.id,
+    name: author.nameTraditional,
+    name_traditional: author.nameTraditional,
+    name_simplified: author.nameSimplified,
+    dynasty: author.dynasty,
+    description: author.descriptionTraditional,
+    description_traditional: author.descriptionTraditional,
+    description_simplified: author.descriptionSimplified,
+    work_count: author.workCount,
+  })).sort((a, b) => `${a.dynasty || ""}${a.name_simplified}`.localeCompare(`${b.dynasty || ""}${b.name_simplified}`));
+  writeR2Json("catalog/authors/all.json", authorRows);
+
+  const dynastyNames = [...new Set([
+    ...works.map((work) => work.dynasty),
+    ...authors.values().map((author) => author.dynasty),
+    ...collections.values().map((collection) => collection.dynasty),
+  ].filter(Boolean))];
+  const dynastyOrder = ["先秦", "秦", "汉", "魏晋", "南北朝", "隋", "唐", "五代", "宋", "辽", "金", "元", "明", "清", "近现代"];
+  const dynastyRows = dynastyNames
+    .sort((a, b) => {
+      const ai = dynastyOrder.indexOf(a);
+      const bi = dynastyOrder.indexOf(b);
+      if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      return String(a).localeCompare(String(b));
+    })
+    .map((name, index) => ({ id: index + 1, name, name_zh: dynastyLabel(name) }));
+  writeR2Json("catalog/dynasties/all.json", dynastyRows);
+
+  const collectionRows = [...collections.values()]
+    .map((collection) => ({
+      id: collection.id,
+      slug: collection.slug,
+      title_traditional: collection.titleTraditional,
+      title_simplified: collection.titleSimplified,
+      type: collection.type,
+      dynasty: collection.dynasty,
+      description_traditional: collection.descriptionTraditional,
+      description_simplified: collection.descriptionSimplified,
+      source_path: collection.sourcePath,
+      sort_order: collection.sortOrder,
+      item_count: collection.itemCount,
+    }))
+    .sort((a, b) => (a.sort_order - b.sort_order) || a.title_simplified.localeCompare(b.title_simplified));
+  writeR2Json("catalog/collections/all.json", collectionRows);
+
+  const nodesByCollection = new Map();
+  const childrenByParent = new Map();
+  for (const node of nodes) {
+    const summary = {
+      id: node.id,
+      collection_id: node.collectionId,
+      parent_id: node.parentId,
+      node_type: node.nodeType,
+      title_traditional: node.titleTraditional,
+      title_simplified: node.titleSimplified,
+      author_id: node.authorId,
+      author_name_traditional: node.authorNameTraditional,
+      author_name_simplified: node.authorNameSimplified,
+      source_path: node.sourcePath,
+      source_ref: node.sourceRef,
+      r2_key: node.r2Key,
+      preview_traditional: node.previewTraditional,
+      preview_simplified: node.previewSimplified,
+      order_index: node.orderIndex,
+      paragraph_count: node.paragraphCount,
+      metadata: node.metadata ? JSON.parse(node.metadata) : {},
+    };
+    addToBucket(nodesByCollection, node.collectionId, summary);
+    if (node.parentId) addToBucket(childrenByParent, node.parentId, summary);
+  }
+
+  for (const collection of collections.values()) {
+    const collectionNodes = (nodesByCollection.get(collection.id) || []).sort((a, b) => {
+      const parentCompare = String(a.parent_id || "").localeCompare(String(b.parent_id || ""));
+      return parentCompare || a.order_index - b.order_index;
+    });
+    const rootNodes = collectionNodes.filter((node) => !node.parent_id).sort((a, b) => a.order_index - b.order_index);
+    writeR2Json(`catalog/collections/${collection.id}.json`, { collection: collectionRows.find((item) => item.id === collection.id), root_nodes: rootNodes });
+    writeR2Json(`catalog/collections/${collection.slug}.json`, { collection: collectionRows.find((item) => item.id === collection.id), root_nodes: rootNodes });
+    writeR2Json(`catalog/collections/${collection.id}/tree.json`, { collection: collectionRows.find((item) => item.id === collection.id), nodes: collectionNodes });
+    writeR2Json(`catalog/collections/${collection.slug}/tree.json`, { collection: collectionRows.find((item) => item.id === collection.id), nodes: collectionNodes });
+  }
+
+  for (const node of nodes) {
+    if (!node.r2Key) continue;
+    const nodeJsonPath = `nodes/${node.id}.json`;
+    const nodePath = path.join(r2Dir, nodeJsonPath);
+    const nodeObject = JSON.parse(fs.readFileSync(nodePath, "utf8"));
+    nodeObject.children = (childrenByParent.get(node.id) || []).sort((a, b) => a.order_index - b.order_index);
+    fs.writeFileSync(nodePath, `${JSON.stringify(nodeObject)}\n`);
+    const manifestItem = r2Objects.find((item) => item.key === node.r2Key);
+    if (manifestItem) manifestItem.bytes = fs.statSync(nodePath).size;
+  }
+
+  writeR2Json("catalog/random/work-ids.json", sortedWorks.map((work) => work.id));
 }
 
 function writeManifest() {
@@ -513,11 +738,64 @@ function writeManifest() {
       book_nodes: nodes.length,
       paragraphs: paragraphs.length,
       strains: strains.length,
-      search_rows: searchRows.length,
+      search_index_rows: searchIndexRows.length,
+      r2_objects: r2Objects.length,
+      r2_bytes: r2Objects.reduce((sum, item) => sum + item.bytes, 0),
     },
+    r2_bucket: r2Bucket,
   };
   fs.writeFileSync(path.join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+  fs.writeFileSync(path.join(outDir, "r2-manifest.json"), JSON.stringify(r2Objects, null, 2));
   console.log(JSON.stringify(manifest, null, 2));
+}
+
+function pruneUnusedAuthorsForLimitedImport() {
+  if (!Number.isFinite(limit)) return;
+  const usedAuthorIds = new Set();
+  for (const work of works) {
+    if (work.authorId) usedAuthorIds.add(work.authorId);
+  }
+  for (const node of nodes) {
+    if (node.authorId) usedAuthorIds.add(node.authorId);
+  }
+
+  for (const id of authors.keys()) {
+    if (!usedAuthorIds.has(id)) authors.delete(id);
+  }
+}
+
+function writeR2UploadScript() {
+  const lines = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `BUCKET="\${1:-${r2Bucket}}"`,
+    'CONCURRENCY="${UPLOAD_CONCURRENCY:-8}"',
+    "export BUCKET",
+    'BASE_DIR="$(cd "$(dirname "$0")" && pwd)"',
+    'MANIFEST="$BASE_DIR/r2-manifest.json"',
+    'LOG="${UPLOAD_LOG:-$BASE_DIR/upload-r2.log}"',
+    "",
+    'if ! command -v jq >/dev/null 2>&1; then',
+    '  echo "jq is required to read $MANIFEST. Install jq or run: brew install jq" >&2',
+    "  exit 1",
+    "fi",
+    "",
+    ': > "$LOG"',
+    'echo "Uploading $(jq length "$MANIFEST") R2 objects to $BUCKET with concurrency=$CONCURRENCY"',
+    "export BASE_DIR LOG",
+    'jq -r \'.[] | [.key, .file] | @tsv\' "$MANIFEST" | xargs -n 2 -P "$CONCURRENCY" bash -c \'',
+    '  set -euo pipefail',
+    '  key="$1"',
+    '  file="$2"',
+    '  npx wrangler r2 object put "$BUCKET/$key" --remote --file="$BASE_DIR/$file" --content-type="application/json" >>"$LOG" 2>&1',
+    '\' _',
+    'echo "R2 upload complete."',
+    "",
+  ];
+
+  const scriptPath = path.join(outDir, "upload-r2.sh");
+  fs.writeFileSync(scriptPath, `${lines.join("\n")}\n`);
+  fs.chmodSync(scriptPath, 0o755);
 }
 
 function recalculateCollectionCounts() {
@@ -551,34 +829,23 @@ function main() {
   }
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
+  fs.mkdirSync(r2Dir, { recursive: true });
 
   importAuthors();
   importPoetryLike();
   importBooks();
-  addBookSearchRows();
+  writeNodeContentObjects();
   importStrains();
+  pruneUnusedAuthorsForLimitedImport();
   recalculateCollectionCounts();
+  writeCatalogIndexes();
 
   fs.copyFileSync(path.join(repoRoot, "migrations", "0001_content_platform.sql"), path.join(outDir, "0000_schema.sql"));
   fs.writeFileSync(path.join(outDir, "0001_clear.sql"), [
-    "DELETE FROM content_search;",
-    "DELETE FROM work_strains;",
-    "DELETE FROM work_metadata;",
-    "DELETE FROM paragraphs;",
-    "DELETE FROM book_nodes;",
-    "DELETE FROM works;",
-    "DELETE FROM content_authors;",
-    "DELETE FROM content_collections;",
+    "-- Static catalog data lives in R2. D1 only stores dynamic user state.",
     "",
   ].join("\n"));
-
-  writeBatches("010_collections", [...collections.values()], collectionInsert);
-  writeBatches("020_authors", [...authors.values()], authorInsert);
-  writeBatches("030_works", works, workInsert);
-  writeBatches("040_book_nodes", nodes, nodeInsert);
-  writeBatches("050_paragraphs", paragraphs, paragraphInsert);
-  writeBatches("060_strains", strains, strainInsert);
-  writeBatches("070_search", searchRows, searchInsert);
+  writeR2UploadScript();
   writeManifest();
 }
 

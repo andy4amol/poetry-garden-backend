@@ -9,6 +9,7 @@ import { convert } from './routes/convert';
 import { works } from './routes/works';
 import { library } from './routes/library';
 import { search } from './routes/search';
+import { readR2Json } from './routes/helpers';
 
 const app = new Hono();
 
@@ -26,7 +27,11 @@ app.get('/api/health', (c) => {
   return json({ version: c.env.API_VERSION || '1.0.0', status: 'ok' });
 });
 
-app.get('/api/dynasties', (c) => {
+app.get('/api/dynasties', async (c) => {
+  c.header('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+  const data = await readR2Json<{ id: number; name: string; name_zh: string }[]>(c.env.CONTENT, 'catalog/dynasties/all.json');
+  if (data?.length) return c.json({ success: true, data });
+
   return c.json({
     success: true,
     data: [

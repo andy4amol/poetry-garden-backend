@@ -5,9 +5,18 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:schema": "wrangler d1 execute poetry-garden --local --file=migrations/0001_content_platform.sql",
+    "db:schema": "wrangler d1 execute poetry-garden-v2 --local --file=migrations/0001_content_platform.sql",
+    "db:schema:remote": "wrangler d1 execute poetry-garden-v2 --remote --file=migrations/0001_content_platform.sql",
+    "db:migrations:local": "wrangler d1 migrations apply poetry-garden-v2 --local",
+    "db:migrations:remote": "wrangler d1 migrations apply poetry-garden-v2 --remote",
+    "db:drop-legacy-content:remote": "wrangler d1 execute poetry-garden --remote --file=maintenance/drop-legacy-content.sql",
+    "db:drop-content-search:remote": "wrangler d1 execute poetry-garden --remote --file=maintenance/drop-content-search.sql",
+    "db:apply-import:remote": "node scripts/apply-content-import.mjs --database poetry-garden-v2 --dir imports/content",
+    "db:rebuild:v2": "bash scripts/rebuild-v2.sh",
     "import:generate": "node scripts/generate-content-import.mjs",
-    "import:sample": "node scripts/generate-content-import.mjs --limit 200"
+    "import:sample": "node scripts/generate-content-import.mjs --limit 200",
+    "r2:upload": "node scripts/upload-r2-direct.mjs --bucket poetry-garden-content --dir imports/content --concurrency 8 --retries 8",
+    "r2:upload:wrangler": "bash imports/content/upload-r2.sh poetry-garden-content"
   },
   "dependencies": {
     "@hono/zod-validator": "^0.2.0",

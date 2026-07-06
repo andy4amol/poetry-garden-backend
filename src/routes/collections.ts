@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
+import { readR2Json } from './helpers';
 
 interface Env {
   DB: D1Database;
+  CONTENT: R2Bucket;
 }
 
 export const collections = new Hono<{ Bindings: Env }>();
@@ -33,12 +35,10 @@ collections.get('/', async (c) => {
     .first();
   const total = countResult?.total || 0;
 
-  // Get collections with content details
   const collectionsQuery = await c.env.DB
     .prepare(`
-      SELECT c.*, p.title, p.author_name, p.dynasty, p.content, p.poem_type
+      SELECT c.*
       FROM collections c
-      LEFT JOIN poems p ON c.content_type = 'poem' AND c.content_id = p.id
       ${whereClause}
       ORDER BY c.created_at DESC
       LIMIT ? OFFSET ?
@@ -46,14 +46,25 @@ collections.get('/', async (c) => {
     .bind(...params, pageSize, offset);
 
   const items = await collectionsQuery.all();
+  const enriched = await Promise.all(items.results.map(async (item: Record<string, unknown>) => {
+    if (item.content_type !== 'poem' && item.content_type !== 'work') return item;
+    const id = String(item.content_id || '');
+    const shard = await readR2Json<Record<string, Record<string, unknown>>>(c.env.CONTENT, `works-shards/${id.slice(0, 2)}.json`);
+    const work = shard?.[id];
+    return {
+      ...item,
+      title: work?.title_traditional || null,
+      author_name: work?.author_name_traditional || null,
+      dynasty: work?.dynasty || null,
+      content: work?.content_traditional || null,
+      poem_type: work?.genre || null,
+    };
+  }));
 
   return c.json({
     success: true,
     data: {
-      items: items.results.map((item: Record<string, unknown>) => ({
-        ...item,
-        content: item.content ? JSON.parse(item.content as string) : null,
-      })),
+      items: enriched,
       total,
       page,
       page_size: pageSize,
