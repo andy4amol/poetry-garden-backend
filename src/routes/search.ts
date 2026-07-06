@@ -17,12 +17,17 @@ async function searchRows(c: { env: Env }, q: string) {
   return (rows || []).filter((row) => String(row.search_text || '').toLowerCase().includes(query));
 }
 
+async function coreScores(bucket: R2Bucket) {
+  return (await readR2Json<Record<string, number>>(bucket, 'catalog/rank/core-scores.json')) || {};
+}
+
 search.get('/', async (c) => {
   const q = (c.req.query('q') || c.req.query('query') || '').trim();
   const { page, pageSize, offset } = pageParams((name) => c.req.query(name));
   if (!q) return c.json({ success: false, error: 'Search query required' }, 400);
 
-  const rows = await searchRows(c, q);
+  const scores = await coreScores(c.env.CONTENT);
+  const rows = (await searchRows(c, q)).sort((a, b) => (scores[String(b.id)] || 0) - (scores[String(a.id)] || 0));
   const items = rows.slice(offset, offset + pageSize).map((row) => ({
     entity_type: 'work',
     entity_id: row.id,
@@ -33,6 +38,7 @@ search.get('/', async (c) => {
     collection: row.collection_title_traditional,
     collection_slug: row.collection_slug,
     snippet: row.preview_traditional,
+    popularity_score: scores[String(row.id)] || row.popularity_score || 0,
   }));
 
   cachePublic(c, 120, 900);
@@ -42,7 +48,8 @@ search.get('/', async (c) => {
 search.get('/suggest', async (c) => {
   const q = (c.req.query('q') || '').trim();
   if (!q) return c.json({ success: true, data: [] });
-  const rows = await searchRows(c, q);
+  const scores = await coreScores(c.env.CONTENT);
+  const rows = (await searchRows(c, q)).sort((a, b) => (scores[String(b.id)] || 0) - (scores[String(a.id)] || 0));
   cachePublic(c, 120, 900);
   return c.json({ success: true, data: rows.slice(0, 10).map((row) => ({
     entity_type: 'work',
@@ -53,5 +60,6 @@ search.get('/suggest', async (c) => {
     genre: row.genre,
     collection: row.collection_title_traditional,
     collection_slug: row.collection_slug,
+    popularity_score: scores[String(row.id)] || row.popularity_score || 0,
   })) });
 });

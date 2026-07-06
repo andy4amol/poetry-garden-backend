@@ -41,6 +41,33 @@ works.get('/', async (c) => {
   return c.json({ success: true, data });
 });
 
+works.get('/popular', async (c) => {
+  const { page, pageSize } = pageParams((name) => c.req.query(name));
+  const authorId = c.req.query('author_id');
+  if (authorId) {
+    const shard = await readR2Json<Record<string, Record<string, unknown>[]>>(c.env.CONTENT, `catalog/rank/author-shards/${authorId.slice(0, 2)}.json`);
+    const rows = shard?.[authorId] || [];
+    const offset = (page - 1) * pageSize;
+    cachePublic(c, 300, 3600);
+    return c.json({
+      success: true,
+      data: {
+        items: rows.slice(offset, offset + pageSize),
+        total: rows.length,
+        page,
+        page_size: pageSize,
+        total_pages: Math.ceil(rows.length / pageSize),
+      },
+    });
+  }
+  const kind = c.req.query('kind') || c.req.query('type') || 'works';
+  const allowed = new Set(['works', 'poetry', 'ci', 'intro']);
+  const prefix = `catalog/popular/${allowed.has(kind) ? kind : 'works'}`;
+  const data = await readCatalogSlice<Record<string, unknown>>(c.env.CONTENT, prefix, page, pageSize);
+  cachePublic(c, 300, 3600);
+  return c.json({ success: true, data });
+});
+
 works.get('/random', async (c) => {
   const ids = await readR2Json<string[]>(c.env.CONTENT, 'catalog/random/work-ids.json');
   if (!ids?.length) return c.json({ success: false, error: 'Work not found' }, 404);

@@ -31,6 +31,7 @@ const r2Objects = [];
 const workContentByShard = new Map();
 const nodeById = new Map();
 const nodeParagraphs = new Map();
+const rankIndexes = loadRankIndexes();
 
 function parseArgs(argv) {
   const result = {};
@@ -64,6 +65,19 @@ function list(dir, predicate) {
   return fs.readdirSync(full).filter(predicate).sort().map((file) => path.join(dir, file));
 }
 
+function walkFiles(dir, predicate) {
+  const full = path.join(dataDir, dir);
+  if (!fs.existsSync(full)) return [];
+  const out = [];
+  for (const entry of fs.readdirSync(full, { withFileTypes: true })) {
+    const filePath = path.join(full, entry.name);
+    const rel = path.relative(dataDir, filePath);
+    if (entry.isDirectory()) out.push(...walkFiles(rel, predicate));
+    else if (!predicate || predicate(entry.name, rel)) out.push(rel);
+  }
+  return out.sort();
+}
+
 function idFor(...parts) {
   return crypto.createHash("sha1").update(parts.filter(Boolean).join("\u0000")).digest("hex").slice(0, 32);
 }
@@ -72,8 +86,143 @@ function s(text) {
   return t2s(String(text || ""));
 }
 
+function norm(text) {
+  return String(text || "").replace(/\s+/g, "").trim();
+}
+
 function json(value) {
   return JSON.stringify(value ?? null);
+}
+
+function rankKey(...parts) {
+  return parts.map(norm).join("\u0000");
+}
+
+function rankScore(row, title = "") {
+  const baidu = Number(row.baidu || 0);
+  const so360 = Number(row.so360 || 0);
+  const google = Number(row.google || 0);
+  const bing = Number(row.bing || 0);
+  const bingEn = Number(row.bing_en || 0);
+  const base =
+    Math.log1p(baidu) * 1.3 +
+    Math.log1p(so360) * 0.9 +
+    Math.log1p(google) * 0.1 +
+    Math.log1p(bing) * 0.15 +
+    Math.log1p(bingEn) * 0.05;
+  const normalizedTitle = norm(title);
+  const genericTitles = new Set(["句", "未题", "未題", "无题", "無題", "诗", "詩", "大"]);
+  const titlePenalty = genericTitles.has(normalizedTitle) ? 0.05 : 1;
+  return Math.round(base * titlePenalty * 1000);
+}
+
+function isPublicPopularWork(work) {
+  const title = norm(work.title_simplified || work.title_traditional);
+  const author = norm(work.author_name_simplified || work.author_name_traditional);
+  const publicAuthors = new Set([
+    "李白", "杜甫", "白居易", "王维", "孟浩然", "李商隐", "杜牧", "刘禹锡", "王昌龄", "岑参",
+    "韩愈", "柳宗元", "韦应物", "王勃", "骆宾王", "陈子昂", "高适", "贾岛", "温庭筠",
+    "苏轼", "辛弃疾", "李清照", "陆游", "王安石", "欧阳修", "柳永", "秦观", "晏殊", "晏几道",
+    "周邦彦", "姜夔", "岳飞", "范仲淹", "黄庭坚", "杨万里", "范成大", "朱熹", "张孝祥",
+    "纳兰性德", "曹操", "陶渊明", "屈原",
+  ]);
+  if (!publicAuthors.has(author)) return false;
+  if (new Set(["句", "未题", "未題", "无题", "無題", "诗", "詩"]).has(title)) return false;
+  if (/^句([一二三四五六七八九十\d].*)?$/.test(title)) return false;
+  if (title.length < 2 || author.length < 2) return false;
+  if (/[□?�]/.test(`${title}${author}`)) return false;
+  if (work.genre === "ci" && norm(work.rhythmic).length < 2) return false;
+  return (work.popularity_score || 0) > 0;
+}
+
+function uniqueBy(rows, keyFn) {
+  const seen = new Set();
+  const result = [];
+  for (const row of rows) {
+    const key = keyFn(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(row);
+  }
+  return result;
+}
+
+function publicWorkKey(work) {
+  const author = work.author_name_simplified || work.author_name_traditional;
+  const title = work.genre === "ci" ? work.rhythmic || work.title_simplified || work.title_traditional : work.title_simplified || work.title_traditional;
+  return rankKey(author, title);
+}
+
+function isIntroClassic(work) {
+  const title = norm(work.title_simplified || work.title_traditional);
+  const rhythmic = norm(work.rhythmic);
+  const known = new Set([
+    "静夜思", "春晓", "登鹳雀楼", "江雪", "悯农", "望庐山瀑布", "早发白帝城", "赠汪伦",
+    "黄鹤楼送孟浩然之广陵", "送元二使安西", "九月九日忆山东兄弟", "相思", "鹿柴", "山居秋暝",
+    "竹里馆", "鸟鸣涧", "赋得古原草送别", "钱塘湖春行", "暮江吟", "琵琶行", "长恨歌",
+    "夜雨寄北", "锦瑟", "泊秦淮", "赤壁", "清明", "山行", "题西林壁", "饮湖上初晴后雨",
+    "元日", "梅花", "示儿", "游山西村", "小池", "晓出净慈寺送林子方",
+    "水调歌头", "念奴娇", "江城子", "浣溪沙", "蝶恋花", "如梦令", "声声慢", "满江红",
+    "卜算子", "临江仙", "虞美人", "相见欢", "雨霖铃", "鹊桥仙", "青玉案", "破阵子",
+  ]);
+  return known.has(title) || known.has(rhythmic);
+}
+
+function betterRank(existing, candidate) {
+  if (!existing) return candidate;
+  return candidate.score > existing.score ? candidate : existing;
+}
+
+function loadRankIndexes() {
+  const poem = new Map();
+  const ci = new Map();
+
+  for (const rel of walkFiles("rank/poet", (name) => name.endsWith(".json"))) {
+    for (const row of readJson(rel)) {
+      const score = rankScore(row, row.title);
+      const value = {
+        score,
+        source: rel,
+        metrics: {
+          baidu: Number(row.baidu || 0),
+          so360: Number(row.so360 || 0),
+          google: Number(row.google || 0),
+          bing: Number(row.bing || 0),
+          bing_en: Number(row.bing_en || 0),
+        },
+      };
+      const key = rankKey(row.author, row.title);
+      poem.set(key, betterRank(poem.get(key), value));
+    }
+  }
+
+  for (const rel of walkFiles("rank/ci", (name) => name.endsWith(".json"))) {
+    for (const row of readJson(rel)) {
+      const score = rankScore(row, row.rhythmic);
+      const value = {
+        score,
+        source: rel,
+        metrics: {
+          baidu: Number(row.baidu || 0),
+          so360: Number(row.so360 || 0),
+          google: Number(row.google || 0),
+          bing: Number(row.bing || 0),
+          bing_en: Number(row.bing_en || 0),
+        },
+      };
+      const key = rankKey(row.author, row.rhythmic);
+      ci.set(key, betterRank(ci.get(key), value));
+    }
+  }
+
+  return { poem, ci };
+}
+
+function rankForWork(input) {
+  if (input.genre === "ci" && input.rhythmic) {
+    return rankIndexes.ci.get(rankKey(input.author, input.rhythmic)) || null;
+  }
+  return rankIndexes.poem.get(rankKey(input.author, input.title)) || null;
 }
 
 function preview(lines, maxLength = 80) {
@@ -178,7 +327,7 @@ function addWork(input) {
     previewSimplified: preview(simplifiedLines),
     tags: tags.length ? json(tags) : null,
     metadata: json(metadata),
-    popularityScore: input.popularityScore || 0,
+    popularityScore: input.popularityScore || input.rank?.score || 0,
     wordCount: plainSimplified.replace(/\s/g, "").length,
     lineCount: traditionalLines.length,
   });
@@ -207,6 +356,7 @@ function addWork(input) {
     source_path: input.sourcePath || null,
     source_id: input.sourceId || input.id || null,
     source_ref: input.sourceRef || null,
+    popularity_score: input.popularityScore || input.rank?.score || 0,
   });
 
   if (authorId) authors.get(authorId).workCount++;
@@ -317,12 +467,14 @@ function importPoetryLike() {
     for (const rel of spec.files) {
       for (const item of readJson(rel)) {
         if (works.length >= limit) return;
+        const rank = rankForWork({ ...item, dynasty: spec.dynasty, genre: spec.genre, rhythmic: item.rhythmic || "" });
         addWork({
           ...item,
           dynasty: spec.dynasty,
           genre: spec.genre,
           formType: spec.formType,
           rhythmic: item.rhythmic || "",
+          rank,
           collectionId,
           collectionTitle: spec.collection.title,
           sourcePath: rel,
@@ -587,6 +739,7 @@ function writeCatalogIndexes() {
     addToBucket(buckets, `dynasty/${safeSegment(summary.dynasty)}`, summary);
     addToBucket(authorBuckets, summary.author_id, summary);
     addToBucket(buckets, `collection/${safeSegment(summary.collection_id)}`, summary);
+    if (summary.rhythmic) addToBucket(buckets, `rhythmic/${safeSegment(summary.rhythmic)}`, summary);
     if (summary.genre && summary.dynasty) addToBucket(buckets, `genre/${safeSegment(summary.genre)}/dynasty/${safeSegment(summary.dynasty)}`, summary);
 
     const searchText = [
@@ -611,6 +764,36 @@ function writeCatalogIndexes() {
 
   for (const [key, rows] of buckets) {
     writePagedCatalog(`catalog/works/${key}`, rows);
+  }
+
+  const popularWorks = uniqueBy(sortedWorks.filter(isPublicPopularWork), publicWorkKey);
+  writePagedCatalog("catalog/popular/works", popularWorks.slice(0, 200));
+  writePagedCatalog("catalog/popular/poetry", uniqueBy(popularWorks.filter((work) => work.genre === "shi"), publicWorkKey).slice(0, 200));
+  writePagedCatalog("catalog/popular/ci", uniqueBy(
+    popularWorks.filter((work) => work.genre === "ci"),
+    publicWorkKey,
+  ).slice(0, 120));
+  writePagedCatalog("catalog/popular/intro", uniqueBy(
+    popularWorks.filter((work) => work.line_count <= 12 && isIntroClassic(work)),
+    publicWorkKey,
+  ).slice(0, 120));
+
+  const coreRankWorks = popularWorks.slice(0, 5000);
+  writeR2Json("catalog/rank/core-scores.json", Object.fromEntries(coreRankWorks.map((work) => [work.id, work.popularity_score || 0])));
+
+  const rankAuthorBuckets = new Map();
+  for (const work of coreRankWorks) {
+    if (!work.author_id) continue;
+    addToBucket(rankAuthorBuckets, work.author_id, work);
+  }
+  const rankAuthorShards = new Map();
+  for (const [authorId, rows] of rankAuthorBuckets) {
+    const shard = String(authorId).slice(0, 2);
+    if (!rankAuthorShards.has(shard)) rankAuthorShards.set(shard, {});
+    rankAuthorShards.get(shard)[authorId] = rows.slice(0, 12);
+  }
+  for (const [shard, authorMap] of rankAuthorShards) {
+    writeR2Json(`catalog/rank/author-shards/${shard}.json`, authorMap);
   }
 
   const authorShards = new Map();
