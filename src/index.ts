@@ -9,6 +9,7 @@ import { convert } from './routes/convert';
 import { works } from './routes/works';
 import { library } from './routes/library';
 import { search } from './routes/search';
+import { compact } from './routes/compact';
 import { readR2Json } from './routes/helpers';
 
 const app = new Hono();
@@ -16,6 +17,20 @@ const app = new Hono();
 // Middleware
 app.use('*', cors());
 app.use('*', logger());
+
+// Normalize trailing slashes: redirect /api/works/ -> /api/works so Hono's
+// sub-router routes (which mount at exact paths, no trailing slash) match.
+// Without this, callers that hit /api/compact/works (no slash) bypass the
+// compact sub-router and fall through to the 404 handler.
+app.use('*', async (c, next) => {
+  const path = c.req.path;
+  if (path !== '/' && path.endsWith('/')) {
+    const trimmed = path.replace(/\/+$/, '');
+    const suffix = c.req.url.slice(c.req.path.length);
+    return c.redirect(trimmed + suffix, 301);
+  }
+  await next();
+});
 
 // Response helper
 const json = (data: unknown, success = true, message?: string) => {
@@ -47,6 +62,7 @@ app.get('/api/dynasties', async (c) => {
 // Routes
 app.route('/api/poems', poems);
 app.route('/api/works', works);
+app.route('/api/compact/works', compact);
 app.route('/api/library', library);
 app.route('/api/search', search);
 app.route('/api/authors', authors);

@@ -15,7 +15,10 @@
     "db:rebuild:v2": "bash scripts/rebuild-v2.sh",
     "import:generate": "node scripts/generate-content-import.mjs",
     "import:sample": "node scripts/generate-content-import.mjs --limit 200",
+    "import:generate:full": "node scripts/generate-content-import.mjs --data ../chinese-poetry --out imports/content/v3 --r2Bucket poetry-garden-content",
+    "import:sample:full": "node scripts/generate-content-import.mjs --data ../chinese-poetry --out imports/content/v3-sample --limit 5000",
     "r2:upload": "node scripts/upload-r2-direct.mjs --bucket poetry-garden-content --dir imports/content --concurrency 8 --retries 8",
+    "r2:upload:v3": "node scripts/upload-r2-direct.mjs --bucket poetry-garden-content --dir imports/content/v3 --concurrency 16 --retries 8",
     "r2:upload:wrangler": "bash imports/content/upload-r2.sh poetry-garden-content"
   },
   "dependencies": {
