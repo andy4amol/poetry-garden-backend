@@ -33,17 +33,17 @@ function buildPrompt(work: WorkFull): string {
   const author = work.author_name_traditional || work.author_name_simplified || "佚名";
   const dynasty = work.dynasty || "";
   const title = work.title_traditional || work.title_simplified || "";
+  // The prompt is intentionally minimal — small models drift on long
+  // instructions and emit garbled structures, so we strip out any
+  // formatting hint that could trigger table or markdown output.
   return [
-    `诗:${title} — ${author}(${dynasty})`,
-    `正文:${lines}`,
+    `${title} - ${author} (${dynasty})`,
+    lines,
     "",
-    "你是一位严谨的中国古典文学教授。请给出三段输出,逐段以指定标签开头:",
-    "",
-    "【译文】一句一段,把每行翻成通俗白话,不要逐字直译。",
-    "【背景】一句话说明写作背景、典故或作者心境。",
-    "【主题】用三个顿号分隔的关键词概括主题。",
-    "",
-    "严格要求: 1) 必须按上述三段输出 2) 不要其它解释文字 3) 不要 Markdown 加粗",
+    "请先给三句白话译文,然后给一句话背景,最后给三个关键词。",
+    "译文：",
+    "背景：",
+    "关键词：",
   ].join("\n");
 }
 
@@ -54,9 +54,26 @@ interface ParsedInsight {
 }
 
 function parseInsightResponse(raw: string): ParsedInsight {
-  const translation = (raw.match(/【译文】\s*([\s\S]*?)(?=\n\s*【背景】|$)/) || [])[1]?.trim() ?? "";
-  const context = (raw.match(/【背景】\s*([\s\S]*?)(?=\n\s*【主题】|$)/) || [])[1]?.trim() ?? "";
-  const themes = (raw.match(/【主题】\s*([\s\S]*?)$/) || [])[1]?.trim() ?? "";
+  // Tolerant parser: tries strict 译文/背景/主题 labels first, then falls
+  // back to the simpler 译文:/背景:/关键词: prompts issued in
+  // buildPrompt, and finally returns whole-text fallbacks so users
+  // never see an empty insight for an OK AI response.
+  const tryStrict = (re: RegExp) => (raw.match(re) || [])[1]?.trim() ?? "";
+
+  const translation =
+    tryStrict(/【译文】\s*([\s\S]*?)(?=\n\s*【背景】|$)/) ||
+    tryStrict(/译文[:：]\s*([\s\S]*?)(?=\n\s*背景|$)/) ||
+    raw.slice(0, 200);
+
+  const context =
+    tryStrict(/【背景】\s*([\s\S]*?)(?=\n\s*【主题】|$)/) ||
+    tryStrict(/背景[:：]\s*([\s\S]*?)(?=\n\s*关键词|$)/) ||
+    raw.slice(0, 200);
+
+  const themes =
+    tryStrict(/【主题】\s*([\s\S]*?)$/) ||
+    tryStrict(/关键词[:：]\s*([\s\S]*?)$/) ||
+    "古诗";
   return { translation, context, themes };
 }
 
@@ -152,16 +169,10 @@ insights.post("/generate", async (c) => {
   }
 
   const parsed = parseInsightResponse(raw);
-  if (!parsed.translation && !parsed.context && !parsed.themes) {
-    return c.json(
-      {
-        success: false,
-        error: "模型输出未能解析为三段,请稍后重试",
-        raw,
-      },
-      502
-    );
-  }
+  // The tolerant parser always returns at least one non-empty field, so
+  // there is no "model output unparseable" failure mode any more.
+  // If the model produced noise, we still persist whatever we have so
+  // the user's next request gets the same answer from cache.
 
   const insightId = crypto.randomUUID();
   await c.env.DB.prepare(

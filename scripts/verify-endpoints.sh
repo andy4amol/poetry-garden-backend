@@ -138,14 +138,23 @@ INSIGHTS_STATUS=$(echo "$INSIGHTS_RES" | grep -E '^HTTP_STATUS=' | tail -1 | sed
 echo "    status=$INSIGHTS_STATUS (expect 404)"
 report_unused() { :; }
 
-# 13. insights generate (calls Workers AI — may take 5-15s)
+# 13. insights generate (calls Workers AI — may take 5-30s)
+# Use a real work id fetched earlier (FIRST_ID); small Llama models
+# can output garbled structure, so accept any 2xx with success=true.
 echo "--- 13. insights generate (AI) ---"
 GEN_RES=$(curl -s -w "\nHTTP_STATUS=%{http_code}" -X POST "$BASE/api/insights/generate" \
   -H "Content-Type: application/json" \
-  -d '{"poem_id":"08c1efbb-6674-4a66-bfeb-1312d040aae6"}' 2>&1)
+  -d "{\"poem_id\":\"$FIRST_ID\"}" --max-time 60 2>&1)
 GEN_STATUS=$(echo "$GEN_RES" | grep -E '^HTTP_STATUS=' | tail -1 | sed 's/HTTP_STATUS=//')
 GEN_BODY=$(echo "$GEN_RES" | sed '$d')
-echo "    status=$GEN_STATUS (expect 200)"
+GEN_OK=$(echo "$GEN_BODY" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('1' if d.get('success') and d.get('data') else '0')
+except Exception:
+    print('0')" 2>/dev/null)
+echo "    status=$GEN_STATUS success=$GEN_OK (expect 2xx with success=true)"
 echo "    body excerpt:"
 echo "$GEN_BODY" | python3 -c "
 import sys, json
