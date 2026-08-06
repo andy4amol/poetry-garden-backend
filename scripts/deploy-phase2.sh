@@ -81,33 +81,22 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
   echo "(using direct REST upload — bypasses wrangler 4.47 OAuth prompt)"
   ACC="${CLOUDFLARE_ACCOUNT_ID:-55195cd3d44ee867f1a9a909db643a7e}"
   SCRIPT_NAME="${WORKER_NAME:-poetry-garden-api}"
-  # CRITICAL: use printf '%s' (not echo) so a trailing newline is NOT
-  # added to the secret. echo on bash/macOS injects a trailing \n, which
-  # the Cloudflare Secrets API treats as part of the secret value and
-  # would cause /api/insights/generate to send "Bearer <key>\n" to the
-  # MiniMax upstream and receive 401 Unauthorized.
-  put_secret() {
-    local name="$1"
-    local value="$2"
-    local status
-    status=$(printf '%s' "${value}" | curl -s -o /dev/null -w "%{http_code}" -X PUT \
-      "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/${name}?account_id=${ACC}" \
-      -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-      -H "Content-Type: text/plain" \
-      --data-binary @-)
-    if [ "${status}" = "200" ]; then
-      echo "  PUT ${name} via REST: ok"
-    else
-      echo "  PUT ${name} via REST: FAILED (HTTP ${status})"
-      echo "    This usually means the API token lacks 'Workers Scripts: Edit' scope."
-      echo "    The deploy will continue but /api/insights/generate will 401."
-      return 1
-    fi
-  }
-  put_secret JWT_SECRET "${JWT_SECRET}" || true
+  # Cloudflare does not document a REST API for setting Worker secrets —
+  # the only documented paths are wrangler CLI and the dashboard. The
+  # previous PUT attempts to a non-existent endpoint returned HTTP 405
+  # (Method Not Allowed), so we delegate to npx wrangler secret put,
+  # which reads the value from stdin and uses the OAuth token that
+  # wrangler login already established.
+  echo "  (no public REST endpoint; using wrangler CLI)"
+
+  printf '%s' "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET >/dev/null \
+    && echo "  PUT JWT_SECRET via wrangler: ok" \
+    || echo "  PUT JWT_SECRET via wrangler: FAILED"
 
   if [ -n "${MINIMAX_API_KEY:-}" ]; then
-    put_secret MINIMAX_API_KEY "${MINIMAX_API_KEY}" || true
+    printf '%s' "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY >/dev/null \
+      && echo "  PUT MINIMAX_API_KEY via wrangler: ok" \
+      || echo "  PUT MINIMAX_API_KEY via wrangler: FAILED"
   else
     echo
     echo "!! MINIMAX_API_KEY env var is not set."
@@ -115,9 +104,14 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
     echo "   Without it, /api/insights/generate will return 502."
   fi
 else
-  printf '%s' "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET
+  # wrangler login fallback path: same direct wrangler calls.
+  printf '%s' "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET >/dev/null \
+    && echo "  PUT JWT_SECRET via wrangler: ok" \
+    || echo "  PUT JWT_SECRET via wrangler: FAILED"
   if [ -n "${MINIMAX_API_KEY:-}" ]; then
-    printf '%s' "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY
+    printf '%s' "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY >/dev/null \
+      && echo "  PUT MINIMAX_API_KEY via wrangler: ok" \
+      || echo "  PUT MINIMAX_API_KEY via wrangler: FAILED"
   fi
 fi
 
