@@ -24,7 +24,9 @@ interface AiRunResult {
   response?: string;
 }
 
-const INSIGHTS_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+// Llama 3.1 8B was deprecated by Cloudflare on 2026-05-30. Llama 3.2 1B is
+// still maintained and is free-tier eligible for short Chinese generations.
+const INSIGHTS_MODEL = "@cf/meta/llama-3.2-1b-instruct";
 
 function buildPrompt(work: WorkFull): string {
   const lines = (work.content_traditional || []).slice(0, 8).join(" / ");
