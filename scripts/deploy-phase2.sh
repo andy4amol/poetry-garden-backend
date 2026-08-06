@@ -86,18 +86,28 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
   # the Cloudflare Secrets API treats as part of the secret value and
   # would cause /api/insights/generate to send "Bearer <key>\n" to the
   # MiniMax upstream and receive 401 Unauthorized.
-  printf '%s' "${JWT_SECRET}" | curl -s -X PUT \
-    "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/JWT_SECRET?account_id=${ACC}" \
-    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-    -H "Content-Type: text/plain" \
-    --data-binary @- > /dev/null && echo "PUT JWT_SECRET via REST: ok"
-
-  if [ -n "${MINIMAX_API_KEY:-}" ]; then
-    printf '%s' "${MINIMAX_API_KEY}" | curl -s -X PUT \
-      "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/MINIMAX_API_KEY?account_id=${ACC}" \
+  put_secret() {
+    local name="$1"
+    local value="$2"
+    local status
+    status=$(printf '%s' "${value}" | curl -s -o /dev/null -w "%{http_code}" -X PUT \
+      "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/${name}?account_id=${ACC}" \
       -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
       -H "Content-Type: text/plain" \
-      --data-binary @- > /dev/null && echo "PUT MINIMAX_API_KEY via REST: ok"
+      --data-binary @-)
+    if [ "${status}" = "200" ]; then
+      echo "  PUT ${name} via REST: ok"
+    else
+      echo "  PUT ${name} via REST: FAILED (HTTP ${status})"
+      echo "    This usually means the API token lacks 'Workers Scripts: Edit' scope."
+      echo "    The deploy will continue but /api/insights/generate will 401."
+      return 1
+    fi
+  }
+  put_secret JWT_SECRET "${JWT_SECRET}" || true
+
+  if [ -n "${MINIMAX_API_KEY:-}" ]; then
+    put_secret MINIMAX_API_KEY "${MINIMAX_API_KEY}" || true
   else
     echo
     echo "!! MINIMAX_API_KEY env var is not set."
