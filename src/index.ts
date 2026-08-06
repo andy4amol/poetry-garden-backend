@@ -16,8 +16,10 @@ import { readR2Json } from './routes/helpers';
 interface Bindings {
   DB: D1Database;
   CONTENT: R2Bucket;
-  AI: Ai;
   JWT_SECRET: string;
+  MINIMAX_API_KEY: string;
+  MINIMAX_BASE_URL?: string;
+  MINIMAX_MODEL?: string;
   API_VERSION: string;
 }
 

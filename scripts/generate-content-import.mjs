@@ -1137,6 +1137,55 @@ function recalculateCollectionCounts() {
   }
 }
 
+function backupRawSource() {
+  // Keep a local copy of the raw chinese-poetry records we ingested so
+  // operators can audit, roll back, or feed downstream tools without
+  // touching the upstream repository. The mirror lives in
+  // <outDir>-raw/<sub>/<file> with a tiny INDEX.json.
+  const rawDir = `${outDir}-raw`;
+  fs.rmSync(rawDir, { recursive: true, force: true });
+  fs.mkdirSync(rawDir, { recursive: true });
+  const indexEntries = [];
+  for (const sub of fs.readdirSync(dataDir)) {
+    if (sub.startsWith(".")) continue;
+    const subPath = path.join(dataDir, sub);
+    if (!fs.statSync(subPath).isDirectory()) continue;
+    const subRawDir = path.join(rawDir, sub);
+    fs.mkdirSync(subRawDir, { recursive: true });
+    for (const f of fs.readdirSync(subPath)) {
+      if (!f.endsWith(".json")) continue;
+      const src = path.join(subPath, f);
+      const dst = path.join(subRawDir, f);
+      fs.copyFileSync(src, dst);
+      const stat = fs.statSync(src);
+      indexEntries.push({
+        source: path.relative(dataDir, src),
+        bytes: stat.size,
+        mirrored_to: path.relative(process.cwd(), dst),
+      });
+    }
+  }
+  fs.writeFileSync(
+    path.join(rawDir, "INDEX.json"),
+    JSON.stringify(
+      {
+        generated_at: new Date().toISOString(),
+        data_dir: dataDir,
+        total_files: indexEntries.length,
+        total_bytes: indexEntries.reduce((sum, e) => sum + e.bytes, 0),
+        entries: indexEntries,
+      },
+      null,
+      2
+    )
+  );
+  console.log(
+    `  raw mirror: ${indexEntries.length} files (${(
+      indexEntries.reduce((s, e) => s + e.bytes, 0) / 1024 / 1024
+    ).toFixed(1)} MiB) at ${rawDir}/`
+  );
+}
+
 function main() {
   if (!fs.existsSync(dataDir)) {
     throw new Error(`Data directory not found: ${dataDir}`);
@@ -1144,6 +1193,12 @@ function main() {
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(r2Dir, { recursive: true });
+
+  // Always mirror the raw source before any cleaning so the original
+  // payload is recoverable even if downstream transforms discard
+  // records (the v3 cleanup rule drops near-empty fragment works).
+  console.log("## Backing up raw source (raw mirror)");
+  backupRawSource();
 
   importAuthors();
   importPoetryLike();

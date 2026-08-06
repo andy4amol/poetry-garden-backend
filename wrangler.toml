@@ -11,13 +11,15 @@ database_id = "1a4cc052-a792-4d54-ab1e-32a6632f2a87"
 binding = "CONTENT"
 bucket_name = "poetry-garden-content"
 
-# Workers AI for /api/insights/generate. Llama 3.1 8B Instruct is sufficient
-# for short-form Chinese explanations and is free on the CF AI gateway.
-[ai]
-binding = "AI"
-
+# /api/insights/generate calls MiniMax M2.1 highspeed via the OpenAI-
+# compatible chat completions endpoint at api.minimaxi.com. The API
+# key is stored as a Worker secret via `wrangler secret put MINIMAX_API_KEY`
+# — the [vars] placeholders below are intentionally invalid so the
+# worker fails closed if the secret is missing in production.
 [vars]
 API_VERSION = "1.0.0"
+MINIMAX_BASE_URL = "https://api.minimaxi.com/v1"
+MINIMAX_MODEL = "MiniMax-M2.1-highspeed"
 # JWT_SECRET is set per-environment via `wrangler secret put JWT_SECRET`.
 # This placeholder is intentionally invalid so the worker fails closed if
 # the secret is missing in production.

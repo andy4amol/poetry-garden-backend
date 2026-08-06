@@ -73,7 +73,7 @@ if [ "$D1_OK" -eq 0 ]; then
 fi
 
 # ----------------------------------------------------------------------
-# Step 2 — store JWT signing secret in the Worker secrets store.
+# Step 2 — store JWT + MiniMax signing secrets in the Worker secrets store.
 # ----------------------------------------------------------------------
 echo
 echo "## Step 2 — store JWT signing secret in the Worker secrets store"
@@ -86,12 +86,31 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
     -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
     -H "Content-Type: text/plain" \
     --data-binary @- > /dev/null && echo "PUT JWT_SECRET via REST: ok"
+
+  # MiniMax API key — required for /api/insights/generate. If the operator
+  # did not export MINIMAX_API_KEY we fall back to npx wrangler secret put
+  # (interactive) so the deploy does not silently ship without the binding.
+  if [ -n "${MINIMAX_API_KEY:-}" ]; then
+    echo "${MINIMAX_API_KEY}" | curl -s -X PUT \
+      "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/MINIMAX_API_KEY?account_id=${ACC}" \
+      -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      -H "Content-Type: text/plain" \
+      --data-binary @- > /dev/null && echo "PUT MINIMAX_API_KEY via REST: ok"
+  else
+    echo
+    echo "!! MINIMAX_API_KEY env var is not set."
+    echo "   Run: export MINIMAX_API_KEY=\"sk-cp-...\" and re-run this script."
+    echo "   Without it, /api/insights/generate will return 502."
+  fi
 else
   echo "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET
+  if [ -n "${MINIMAX_API_KEY:-}" ]; then
+    echo "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY
+  fi
 fi
 
 # ----------------------------------------------------------------------
-# Step 3 — deploy Worker (with the [ai] binding + JWT_SECRET binding active).
+# Step 3 — deploy Worker (with MiniMax API key + JWT_SECRET bound).
 # ----------------------------------------------------------------------
 echo
 echo "## Step 3 — deploy Worker (with the [ai] binding + JWT_SECRET binding active)"

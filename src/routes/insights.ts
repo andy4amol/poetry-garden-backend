@@ -4,7 +4,13 @@ import { cachePublic, readR2Json } from "./helpers";
 interface Env {
   DB: D1Database;
   CONTENT: R2Bucket;
-  AI: Ai;
+  // Secrets uploaded via `wrangler secret put MINIMAX_API_KEY` (or the
+  // MINIMAX_API_KEY env var when running locally). The MINIMAX_BASE_URL
+  // is configurable for local dev (e.g. a proxy) but defaults to the
+  // public MiniMax endpoint.
+  MINIMAX_API_KEY: string;
+  MINIMAX_BASE_URL?: string;
+  MINIMAX_MODEL?: string;
 }
 
 export const insights = new Hono<{ Bindings: Env }>();
@@ -20,13 +26,34 @@ interface WorkFull {
   content_simplified: string[] | null;
 }
 
-interface AiRunResult {
-  response?: string;
+interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
 }
 
-// Llama 3.1 8B was deprecated by Cloudflare on 2026-05-30. Llama 3.2 1B is
-// still maintained and is free-tier eligible for short Chinese generations.
-const INSIGHTS_MODEL = "@cf/meta/llama-3.2-1b-instruct";
+interface ChatChoice {
+  index: number;
+  message: ChatMessage;
+  finish_reason: string;
+}
+
+interface ChatResponse {
+  id: string;
+  model: string;
+  choices: ChatChoice[];
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+// Llama 3.1 8B was deprecated by Cloudflare on 2026-05-30. The current
+// default model is MiniMax M2.1 highspeed, an OpenAI-compatible chat
+// model hosted at api.minimaxi.com. Cheap, fast, and good at short
+// Chinese-language output.
+const DEFAULT_MODEL = "MiniMax-M2.1-highspeed";
+const DEFAULT_BASE_URL = "https://api.minimaxi.com/v1";
 
 function buildPrompt(work: WorkFull): string {
   const lines = (work.content_traditional || []).slice(0, 8).join(" / ");
@@ -77,6 +104,40 @@ function parseInsightResponse(raw: string): ParsedInsight {
   return { translation, context, themes };
 }
 
+async function callMinimax(
+  apiKey: string,
+  baseUrl: string,
+  model: string,
+  work: WorkFull
+): Promise<string> {
+  const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const body = {
+    model,
+    messages: [
+      { role: "system", content: "你是一位严谨的中国古典文学教授。" },
+      { role: "user", content: buildPrompt(work) },
+    ],
+    max_tokens: 600,
+    temperature: 0.4,
+  };
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`MiniMax ${res.status} ${res.statusText} ${text}`.trim());
+  }
+  const json = (await res.json()) as ChatResponse;
+  const content = json.choices?.[0]?.message?.content;
+  if (!content) throw new Error("MiniMax response missing choices[0].message.content");
+  return content;
+}
+
 // GET /api/insights/:poemId — return the cached insight, or 404 if none.
 insights.get("/:poemId", async (c) => {
   const poemId = c.req.param("poemId");
@@ -105,8 +166,9 @@ insights.get("/:poemId", async (c) => {
 });
 
 // POST /api/insights/generate — body { poem_id }
-// Looks up the work, runs Workers AI, persists the result, returns it.
-// If a cached insight exists it is returned directly (no AI call).
+// Looks up the work, calls MiniMax for a fresh insight, persists the
+// result keyed by poem_id. If a cached insight exists, returns it
+// without making a new AI call.
 insights.post("/generate", async (c) => {
   let payload: { poem_id?: string };
   try {
@@ -150,17 +212,12 @@ insights.post("/generate", async (c) => {
   const work = shard?.[poemId];
   if (!work) return c.json({ success: false, error: "Work not found" }, 404);
 
-  // Call Workers AI
+  // Call MiniMax
+  const baseUrl = c.env.MINIMAX_BASE_URL || DEFAULT_BASE_URL;
+  const model = c.env.MINIMAX_MODEL || DEFAULT_MODEL;
   let raw = "";
   try {
-    const result = (await c.env.AI.run(INSIGHTS_MODEL, {
-      messages: [
-        { role: "system", content: "你是一位严谨的中国古典文学教授。" },
-        { role: "user", content: buildPrompt(work) },
-      ],
-      max_tokens: 600,
-    })) as AiRunResult;
-    raw = result.response ?? "";
+    raw = await callMinimax(c.env.MINIMAX_API_KEY, baseUrl, model, work);
   } catch (err) {
     return c.json(
       { success: false, error: `AI 调用失败: ${(err as Error).message}` },
@@ -178,7 +235,7 @@ insights.post("/generate", async (c) => {
   await c.env.DB.prepare(
     "INSERT OR REPLACE INTO insights (id, poem_id, translation, context, themes, model, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))"
   )
-    .bind(insightId, poemId, parsed.translation, parsed.context, parsed.themes, INSIGHTS_MODEL)
+    .bind(insightId, poemId, parsed.translation, parsed.context, parsed.themes, model)
     .run();
 
   return c.json({
@@ -189,7 +246,7 @@ insights.post("/generate", async (c) => {
       translation: parsed.translation,
       context: parsed.context,
       themes: parsed.themes.split(/[、,,;\s]+/).filter(Boolean),
-      model: INSIGHTS_MODEL,
+      model,
       cached: false,
     },
   });
