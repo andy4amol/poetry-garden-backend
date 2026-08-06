@@ -87,16 +87,35 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
   # (Method Not Allowed), so we delegate to npx wrangler secret put,
   # which reads the value from stdin and uses the OAuth token that
   # wrangler login already established.
+  #
+  # We delete-then-put rather than just put because wrangler 4.47 has a
+  # bug where re-uploading an existing secret returns 'Binding name
+  # 'JWT_SECRET' already in use' instead of updating the value. The
+  # delete-then-put pattern sidesteps that and is idempotent if the
+  # secret does not yet exist (delete returns 0 silently).
   echo "  (no public REST endpoint; using wrangler CLI)"
 
-  printf '%s' "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET >/dev/null \
-    && echo "  PUT JWT_SECRET via wrangler: ok" \
-    || echo "  PUT JWT_SECRET via wrangler: FAILED"
+  push_secret() {
+    local name="$1"
+    local value="$2"
+    if [ -z "${value}" ]; then
+      echo "  PUT ${name} via wrangler: SKIPPED (no value)"
+      return 0
+    fi
+    npx wrangler secret delete "${name}" >/dev/null 2>&1 || true
+    if printf '%s' "${value}" | npx wrangler secret put "${name}" >/dev/null 2>&1; then
+      echo "  PUT ${name} via wrangler: ok"
+      return 0
+    else
+      echo "  PUT ${name} via wrangler: FAILED"
+      return 1
+    fi
+  }
+
+  push_secret JWT_SECRET "${JWT_SECRET}" || true
 
   if [ -n "${MINIMAX_API_KEY:-}" ]; then
-    printf '%s' "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY >/dev/null \
-      && echo "  PUT MINIMAX_API_KEY via wrangler: ok" \
-      || echo "  PUT MINIMAX_API_KEY via wrangler: FAILED"
+    push_secret MINIMAX_API_KEY "${MINIMAX_API_KEY}" || true
   else
     echo
     echo "!! MINIMAX_API_KEY env var is not set."
@@ -104,15 +123,18 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
     echo "   Without it, /api/insights/generate will return 502."
   fi
 else
-  # wrangler login fallback path: same direct wrangler calls.
-  printf '%s' "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET >/dev/null \
-    && echo "  PUT JWT_SECRET via wrangler: ok" \
-    || echo "  PUT JWT_SECRET via wrangler: FAILED"
-  if [ -n "${MINIMAX_API_KEY:-}" ]; then
-    printf '%s' "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY >/dev/null \
-      && echo "  PUT MINIMAX_API_KEY via wrangler: ok" \
-      || echo "  PUT MINIMAX_API_KEY via wrangler: FAILED"
-  fi
+  # wrangler login fallback path: same delete-then-put pattern.
+  push_secret() {
+    local name="$1"
+    local value="$2"
+    if [ -z "${value}" ]; then return 0; fi
+    npx wrangler secret delete "${name}" >/dev/null 2>&1 || true
+    printf '%s' "${value}" | npx wrangler secret put "${name}" >/dev/null 2>&1 \
+      && echo "  PUT ${name} via wrangler: ok" \
+      || echo "  PUT ${name} via wrangler: FAILED"
+  }
+  push_secret JWT_SECRET "${JWT_SECRET}"
+  push_secret MINIMAX_API_KEY "${MINIMAX_API_KEY:-}"
 fi
 
 # ----------------------------------------------------------------------
