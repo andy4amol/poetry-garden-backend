@@ -81,17 +81,19 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
   echo "(using direct REST upload — bypasses wrangler 4.47 OAuth prompt)"
   ACC="${CLOUDFLARE_ACCOUNT_ID:-55195cd3d44ee867f1a9a909db643a7e}"
   SCRIPT_NAME="${WORKER_NAME:-poetry-garden-api}"
-  echo "${JWT_SECRET}" | curl -s -X PUT \
+  # CRITICAL: use printf '%s' (not echo) so a trailing newline is NOT
+  # added to the secret. echo on bash/macOS injects a trailing \n, which
+  # the Cloudflare Secrets API treats as part of the secret value and
+  # would cause /api/insights/generate to send "Bearer <key>\n" to the
+  # MiniMax upstream and receive 401 Unauthorized.
+  printf '%s' "${JWT_SECRET}" | curl -s -X PUT \
     "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/JWT_SECRET?account_id=${ACC}" \
     -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
     -H "Content-Type: text/plain" \
     --data-binary @- > /dev/null && echo "PUT JWT_SECRET via REST: ok"
 
-  # MiniMax API key — required for /api/insights/generate. If the operator
-  # did not export MINIMAX_API_KEY we fall back to npx wrangler secret put
-  # (interactive) so the deploy does not silently ship without the binding.
   if [ -n "${MINIMAX_API_KEY:-}" ]; then
-    echo "${MINIMAX_API_KEY}" | curl -s -X PUT \
+    printf '%s' "${MINIMAX_API_KEY}" | curl -s -X PUT \
       "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/MINIMAX_API_KEY?account_id=${ACC}" \
       -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
       -H "Content-Type: text/plain" \
@@ -103,9 +105,9 @@ if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
     echo "   Without it, /api/insights/generate will return 502."
   fi
 else
-  echo "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET
+  printf '%s' "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET
   if [ -n "${MINIMAX_API_KEY:-}" ]; then
-    echo "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY
+    printf '%s' "${MINIMAX_API_KEY}" | npx wrangler secret put MINIMAX_API_KEY
   fi
 fi
 
@@ -113,7 +115,26 @@ fi
 # Step 3 — deploy Worker (with MiniMax API key + JWT_SECRET bound).
 # ----------------------------------------------------------------------
 echo
-echo "## Step 3 — deploy Worker (with the [ai] binding + JWT_SECRET binding active)"
+echo "## Step 3 — deploy Worker (with MiniMax API key + JWT_SECRET bound)"
+echo "(verifying both secrets are present in the Worker before deploy)"
+
+# Pre-flight: confirm the secrets are actually present in the worker
+# before we re-deploy. If the MiniMax key is missing the deploy would
+# succeed but /api/insights/generate would 401 on every call.
+SECRETS_OUTPUT=$(npx wrangler secret list 2>&1 || true)
+echo "${SECRETS_OUTPUT}" | head -20
+if ! echo "${SECRETS_OUTPUT}" | grep -qE "MINIMAX_API_KEY|JWT_SECRET"; then
+  echo
+  echo "!! Required secrets missing from the Worker."
+  echo "   The deploy would still succeed but /api/auth/me and"
+  echo "   /api/insights/generate would 401 / 401 on every call."
+  if [ -z "${MINIMAX_API_KEY:-}" ]; then
+    echo "   MINIMAX_API_KEY env var is not set. Re-run this script with"
+    echo "   export MINIMAX_API_KEY=\"sk-cp-...\" to also push the secret."
+  fi
+  exit 1
+fi
+
 npm run deploy
 
 # ----------------------------------------------------------------------
