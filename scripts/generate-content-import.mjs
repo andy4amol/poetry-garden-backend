@@ -296,6 +296,20 @@ function addWork(input) {
   const traditionalLines = linesFrom(input.paragraphs || input.content || input.para);
   if (!traditionalLines.length) return null;
 
+  // Drop near-empty / fragment-only works that come from chinese-poetry
+  // originals marked "仅存 XXX 字", "上缺", "佚句", etc. These render
+  // as 30+ blank squares in the front-end and pollute ranking.
+  const totalChars = traditionalLines.join("").replace(/[\s\u3000\p{P}]/gu, "").length;
+  const ratioNonChinese = (text) => {
+    const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+    return text.length === 0 ? 0 : cjk / text.length;
+  };
+  const ratio = ratioNonChinese(traditionalLines.join(""));
+  const looksFragment = /（上缺）|\(上缺\)|仅存|佚句|残句|中缺|末缺/.test(traditionalLines.join(""));
+  if (totalChars < 6) return null;
+  if (ratio < 0.4) return null;             // mostly punctuation / junk
+  if (looksFragment) return null;
+
   const authorId = addAuthor(input.author || "", input.dynasty || "", input.authorDescription || "", input.source || "", input.authorSourceId || "");
   const title = input.title || input.rhythmic || "未题";
   const workId = input.id || idFor("work", input.sourcePath, input.sourceRef || "", input.dynasty || "", input.author || "", title, traditionalLines.join("\n"));
