@@ -19,6 +19,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Detect wrangler 4.47.0 — known to have a 'Binding already in use'
+# secret-put bug where the API rejects new secrets even though the
+# secret list does not show them. We don't refuse to run on 4.47 (the
+# upstream D1 + deploy paths still work), but we print a loud warning
+# so the operator knows to upgrade.
+if node_modules/.bin/wrangler --version 2>/dev/null | grep -q "^4\.47\."; then
+  echo "## WARNING: wrangler $(node_modules/.bin/wrangler --version 2>/dev/null) detected."
+  echo "##   4.47.0 has a 'Binding already in use' bug for \`wrangler secret put\`."
+  echo "##   If the deploy fails on Step 2, run:"
+  echo "##     npm install --save-dev wrangler@4.119"
+  echo "##   then re-run this script."
+fi
+
 DATABASE_NAME="poetry-garden-v2"
 BUCKET_NAME="poetry-garden-content"
 API_URL_DEFAULT="https://poetry-garden-api.luyanzhou2023.workers.dev"
