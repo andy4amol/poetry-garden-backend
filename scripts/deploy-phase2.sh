@@ -4,6 +4,15 @@
 #
 # Run from the poetry-garden-backend/ directory on a machine that has
 # wrangler login completed.
+#
+# Why this script exists:
+#   - wrangler 4.47.0 has a known bug ([ERR_INVALID_STATE] "A FileHandle
+#     object was closed during garbage collection") that fails any
+#     `wrangler d1 execute --file=...` against a remote database.
+#   - This script works around it by detecting the wrangler version
+#     and falling back to a CF REST API based migration applier
+#     (`scripts/apply-migrations.mjs`) when wrangler would otherwise
+#     fail.
 
 set -euo pipefail
 
@@ -23,26 +32,82 @@ echo " Phase 2 deploy (D1 + Workers AI + Worker code)"
 echo "===================================================="
 echo
 
+# ----------------------------------------------------------------------
+# Step 0 — pick a D1-applier strategy.
+#   - If `CLOUDFLARE_API_TOKEN` is set, we go through apply-migrations.mjs
+#     which calls the CF REST API directly. This avoids the wrangler
+#     4.47 FileHandle bug entirely.
+#   - Otherwise we fall back to `wrangler d1 execute --file=...`. If that
+#     hits the same `[ERR_INVALID_STATE]`, print the actionable fix:
+#     set CLOUDFLARE_API_TOKEN and re-run.
+# ----------------------------------------------------------------------
 echo "## Step 1 — apply D1 migration to the remote database"
-echo "(idempotent: errors on existing tables are skipped)"
 echo
-npx wrangler d1 execute "$DATABASE_NAME" --remote --file=migrations/0002_insights.sql
 
+D1_OK=0
+if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  echo "(using REST API applier — bypasses wrangler 4.47 FileHandle bug)"
+  if node scripts/apply-migrations.mjs --database "$DATABASE_NAME"; then
+    D1_OK=1
+  fi
+fi
+
+if [ "$D1_OK" -eq 0 ]; then
+  echo "(fallback to wrangler CLI)"
+  echo "(if this fails with [ERR_INVALID_STATE] FileHandle closed,"
+  echo " set CLOUDFLARE_API_TOKEN to bypass the bug — see apply-migrations.mjs)"
+  if npx wrangler d1 execute "$DATABASE_NAME" --remote \
+       --file=migrations/0001_content_platform.sql && \
+     npx wrangler d1 execute "$DATABASE_NAME" --remote \
+       --file=migrations/0002_insights.sql; then
+    D1_OK=1
+  fi
+fi
+
+if [ "$D1_OK" -eq 0 ]; then
+  echo
+  echo "!! Migration failed. Set CLOUDFLARE_API_TOKEN and rerun."
+  echo "   Get one at https://dash.cloudflare.com/profile/api-tokens"
+  echo "   (Account: Cloudflare D1:Edit permissions, then 'export' to env var)"
+  exit 1
+fi
+
+# ----------------------------------------------------------------------
+# Step 2 — store JWT signing secret in the Worker secrets store.
+# ----------------------------------------------------------------------
 echo
 echo "## Step 2 — store JWT signing secret in the Worker secrets store"
-echo "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET
+if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  echo "(using direct REST upload — bypasses wrangler 4.47 OAuth prompt)"
+  ACC="${CLOUDFLARE_ACCOUNT_ID:-55195cd3d44ee867f1a9a909db643a7e}"
+  SCRIPT_NAME="${WORKER_NAME:-poetry-garden-api}"
+  echo "${JWT_SECRET}" | curl -s -X PUT \
+    "https://api.cloudflare.com/client/v4/accounts/${ACC}/workers/scripts/${SCRIPT_NAME}/secrets/JWT_SECRET?account_id=${ACC}" \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+    -H "Content-Type: text/plain" \
+    --data-binary @- > /dev/null && echo "PUT JWT_SECRET via REST: ok"
+else
+  echo "${JWT_SECRET}" | npx wrangler secret put JWT_SECRET
+fi
 
+# ----------------------------------------------------------------------
+# Step 3 — deploy Worker (with the [ai] binding + JWT_SECRET binding active).
+# ----------------------------------------------------------------------
 echo
 echo "## Step 3 — deploy Worker (with the [ai] binding + JWT_SECRET binding active)"
 npm run deploy
 
+# ----------------------------------------------------------------------
+# Step 4 — verify Phase 2 endpoints after deploy.
+# ----------------------------------------------------------------------
 echo
 echo "## Step 4 — verify Phase 2 endpoints after deploy"
 echo "(auth register/login/me should yield 200; insights/generate needs an"
-echo "  R2 work shard at the chosen poem_id AND Workers AI enabled on the"
-echo "  Cloudflare account to yield 200)"
+echo " R2 work shard at the chosen poem_id AND Workers AI enabled on the"
+echo " Cloudflare account to yield 200)"
 echo
-bash scripts/verify-endpoints.sh "${VERIFY_API_URL:-$API_URL_DEFAULT}"
+VERIFY_API_URL="${VERIFY_API_URL:-$API_URL_DEFAULT}"
+bash scripts/verify-endpoints.sh "$VERIFY_API_URL"
 
 echo
 echo "## Done. Inspect output above:"
