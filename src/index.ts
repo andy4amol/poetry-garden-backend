@@ -10,9 +10,18 @@ import { works } from './routes/works';
 import { library } from './routes/library';
 import { search } from './routes/search';
 import { compact } from './routes/compact';
+import insights from './routes/insights';
 import { readR2Json } from './routes/helpers';
 
-const app = new Hono();
+interface Bindings {
+  DB: D1Database;
+  CONTENT: R2Bucket;
+  AI: Ai;
+  JWT_SECRET: string;
+  API_VERSION: string;
+}
+
+const app = new Hono<{ Bindings: Bindings }>();
 
 // Middleware
 app.use('*', cors());
@@ -63,6 +72,7 @@ app.get('/api/dynasties', async (c) => {
 app.route('/api/poems', poems);
 app.route('/api/works', works);
 app.route('/api/compact/works', compact);
+app.route('/api/insights', insights);
 app.route('/api/library', library);
 app.route('/api/search', search);
 app.route('/api/authors', authors);

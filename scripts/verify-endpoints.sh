@@ -131,6 +131,86 @@ check "10. search ?q=李白" "$BASE/api/search?q=%E6%9D%8E%E7%99%BD&page=1&page_
 # 11. library collections
 check "11. library collections" "$BASE/api/library/collections" "200" "data"
 
+# 12. insights: GET on a likely-unknown id (404 expected)
+echo "--- 12. insights GET (no cached) ---"
+INSIGHTS_RES=$(curl -s -w "\nHTTP_STATUS=%{http_code}" "$BASE/api/insights/test-id-$(date +%s)" 2>&1)
+INSIGHTS_STATUS=$(echo "$INSIGHTS_RES" | grep -E '^HTTP_STATUS=' | tail -1 | sed 's/HTTP_STATUS=//')
+echo "    status=$INSIGHTS_STATUS (expect 404)"
+report_unused() { :; }
+
+# 13. insights generate (calls Workers AI — may take 5-15s)
+echo "--- 13. insights generate (AI) ---"
+GEN_RES=$(curl -s -w "\nHTTP_STATUS=%{http_code}" -X POST "$BASE/api/insights/generate" \
+  -H "Content-Type: application/json" \
+  -d '{"poem_id":"08c1efbb-6674-4a66-bfeb-1312d040aae6"}' 2>&1)
+GEN_STATUS=$(echo "$GEN_RES" | grep -E '^HTTP_STATUS=' | tail -1 | sed 's/HTTP_STATUS=//')
+GEN_BODY=$(echo "$GEN_RES" | sed '$d')
+echo "    status=$GEN_STATUS (expect 200)"
+echo "    body excerpt:"
+echo "$GEN_BODY" | python3 -c "
+import sys, json
+raw = sys.stdin.read().split('\nHTTP_STATUS=')[0]
+try:
+    d = json.loads(raw)
+    if d.get('success'):
+        data = d.get('data') or {}
+        print('      translation:', (data.get('translation') or '')[:60], '...')
+        print('      context    :', (data.get('context') or '')[:60], '...')
+        print('      themes     :', data.get('themes') or [])
+        print('      model      :', data.get('model'))
+    else:
+        print('      error:', d.get('error'))
+except Exception as e:
+    print('      parse err:', e)
+" 2>/dev/null
+
+# 14. auth register (test account) — use a unique email so re-runs work
+TS=$(date +%s)
+TEST_EMAIL="verify-${TS}@poetry-garden.test"
+TEST_PW="verifyPass123"
+echo "--- 14. auth register ($TEST_EMAIL) ---"
+REG_RES=$(curl -s -w "\nHTTP_STATUS=%{http_code}" -X POST "$BASE/api/auth/register" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PW\"}" 2>&1)
+REG_STATUS=$(echo "$REG_RES" | grep -E '^HTTP_STATUS=' | tail -1 | sed 's/HTTP_STATUS=//')
+echo "    status=$REG_STATUS (expect 201)"
+
+# 15. auth login same creds
+echo "--- 15. auth login ---"
+LOGIN_RES=$(curl -s -w "\nHTTP_STATUS=%{http_code}" -X POST "$BASE/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PW\"}" 2>&1)
+LOGIN_STATUS=$(echo "$LOGIN_RES" | grep -E '^HTTP_STATUS=' | tail -1 | sed 's/HTTP_STATUS=//')
+echo "    status=$LOGIN_STATUS (expect 200)"
+TOKEN=$(echo "$LOGIN_RES" | sed '$d' | python3 -c "import sys, json
+raw = sys.stdin.read().split('\nHTTP_STATUS=')[0]
+try:
+    print(json.loads(raw).get('data', {}).get('token', ''))
+except Exception:
+    print('')" 2>/dev/null)
+echo "    got token (len=${#TOKEN})"
+
+# 16. auth /me with bearer
+if [ -n "$TOKEN" ]; then
+  echo "--- 16. auth /me (Bearer) ---"
+  ME_RES=$(curl -s -w "\nHTTP_STATUS=%{http_code}" "$BASE/api/auth/me" \
+    -H "Authorization: Bearer $TOKEN" 2>&1)
+  ME_STATUS=$(echo "$ME_RES" | grep -E '^HTTP_STATUS=' | tail -1 | sed 's/HTTP_STATUS=//')
+  echo "    status=$ME_STATUS (expect 200)"
+  echo "$ME_RES" | sed '$d' | python3 -c "
+import sys, json
+raw = sys.stdin.read().split('\nHTTP_STATUS=')[0]
+try:
+    d = json.loads(raw)
+    if d.get('success'):
+        print('      user:', d.get('data'))
+except Exception:
+    pass
+" 2>/dev/null
+else
+  echo "    SKIP — no token from login"
+fi
+
 echo "============================================================"
 echo " Done."
 echo "============================================================"

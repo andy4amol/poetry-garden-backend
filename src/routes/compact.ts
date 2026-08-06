@@ -1,10 +1,12 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cachePublic, encodeCatalogSegment, pageParams, readAuthorCatalogSlice, readCatalogSlice, readR2Json } from './helpers';
 
 interface Env {
   DB: D1Database;
   CONTENT: R2Bucket;
 }
+
+type CompactContext = Context<{ Bindings: Env }>;
 
 export const compact = new Hono<{ Bindings: Env }>();
 
@@ -80,7 +82,7 @@ function catalogPrefix(query: (name: string) => string | undefined) {
   return 'catalog/works/all';
 }
 
-function compactList(c: { req: { query: (k: string) => string | undefined }; env: { CONTENT: R2Bucket } }, cacheEdge: number = 3600) {
+function compactList(c: CompactContext, cacheEdge: number = 3600) {
   const idsParam = c.req.query('ids');
   if (idsParam) {
     // Bulk lookup for shelves / collection lists. Each id reads its own R2
@@ -88,8 +90,7 @@ function compactList(c: { req: { query: (k: string) => string | undefined }; env
     // to keep R2 class-B usage predictable; callers that need more should page
     // through /works first.
     const ids = idsParam.split(',').slice(0, 128);
-    const rowsPromise = readWorksByIds(c.env.CONTENT, ids);
-    return rowsPromise.then((rows) => {
+    return readWorksByIds(c.env.CONTENT, ids).then((rows) => {
       cachePublic(c, 60, 300);
       return {
         success: true,
@@ -106,10 +107,10 @@ function compactList(c: { req: { query: (k: string) => string | undefined }; env
 
   const { page, pageSize } = pageParams((name) => c.req.query(name));
   const authorId = c.req.query('author_id');
-  return (authorId
+  const rowsPromise = authorId
     ? readAuthorCatalogSlice<Record<string, unknown>>(c.env.CONTENT, authorId, page, pageSize)
-    : readCatalogSlice<Record<string, unknown>>(c.env.CONTENT, catalogPrefix((name) => c.req.query(name)), page, pageSize)
-  ).then((data) => {
+    : readCatalogSlice<Record<string, unknown>>(c.env.CONTENT, catalogPrefix((name) => c.req.query(name)), page, pageSize);
+  return rowsPromise.then((data) => {
     cachePublic(c, 300, cacheEdge);
     return {
       success: true,
@@ -121,7 +122,7 @@ function compactList(c: { req: { query: (k: string) => string | undefined }; env
   });
 }
 
-async function compactListHandler(c: { req: { query: (k: string) => string | undefined }; env: { CONTENT: R2Bucket } }) {
+async function compactListHandler(c: CompactContext) {
   return c.json(await compactList(c));
 }
 
