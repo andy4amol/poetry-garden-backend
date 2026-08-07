@@ -154,13 +154,36 @@ compact.get('/popular', async (c) => {
   const kind = c.req.query('kind') || c.req.query('type') || 'works';
   const allowed = new Set(['works', 'poetry', 'ci', 'intro']);
   const prefix = `catalog/popular/${allowed.has(kind) ? kind : 'works'}`;
+
+  // Optional deterministic shuffle (?shuffle=12345). The full popular
+  // slice is 200 items; if the caller passes shuffle we deterministically
+  // pick a contiguous window of `pageSize` so each visitor sees a
+  // different top-N while still caching aggressively at the edge.
+  const shuffle = c.req.query('shuffle');
   const data = await readCatalogSlice<Record<string, unknown>>(c.env.CONTENT, prefix, page, pageSize);
+  let items = data.items as Record<string, unknown>[];
+  if (shuffle && items.length > pageSize) {
+    const seed = Number(shuffle);
+    if (Number.isFinite(seed) && seed >= 0) {
+      const stride = Math.max(1, Math.floor(items.length / pageSize));
+      const offset = (seed * stride) % Math.max(1, items.length - pageSize + 1);
+      items = items.slice(offset, offset + pageSize);
+      if (items.length < pageSize) {
+        // top up from the front so the response is always full
+        items = items.concat((data.items as Record<string, unknown>[]).slice(0, pageSize - items.length));
+      }
+    }
+  }
+
   cachePublic(c, 300, 3600);
   return c.json({
     success: true,
     data: {
       ...data,
-      items: projectItems(data.items as Record<string, unknown>[]),
+      items: projectItems(items),
+      // We don't claim `total` because the slice is now a personalized
+      // window, not a stable count of "popular poems".
+      total: items.length,
     },
   });
 });
